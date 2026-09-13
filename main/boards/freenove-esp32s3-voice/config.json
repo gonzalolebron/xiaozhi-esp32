@@ -1,0 +1,14 @@
+{
+    "type": "freenove-esp32s3-voice",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "freenove-esp32s3-voice",
+            "sdkconfig_append": [
+                "CONFIG_OTA_URL=\"http://192.168.0.105:8003/xiaozhi/ota/\"",
+                "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y",
+                "CONFIG_SPIRAM_MODE_OCT=y"
+            ]
+        }
+    ]
+}

@@ -185,6 +185,10 @@ choice BOARD_TYPE
     config BOARD_TYPE_DF_K10
         bool "DFRobot UNIHIKER K10 (行空板 K10)"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_FREENOVE_ESP32S3_VOICE
+        bool "Freenove ESP32-S3 Sofia (INMP441 + MAX98357A)"
+        depends on IDF_TARGET_ESP32S3
+
     config BOARD_TYPE_DOIT_S3_AIBOX
         bool "DOIT S3 AIBox (四博智联 AI 陪伴盒子)"
         depends on IDF_TARGET_ESP32S3
