@@ -709,6 +709,14 @@ elseif(CONFIG_BOARD_TYPE_SEEED_STUDIO_SENSECAP_WATCHER)
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_30_4)
     set(BUILTIN_ICON_FONT font_material_symbols_20_4)
     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_128)
+elseif(CONFIG_BOARD_TYPE_FREENOVE_ESP32S3_VOICE)
+    set(BOARD_DIR "freenove-esp32s3-voice")
+    # Without these three lines the board declared no emoji collection, which
+    # is why the face never changed: the firmware had no image to put up for
+    # each emotion.
+    set(BUILTIN_TEXT_FONT font_noto_sans_basic_20_4)
+    set(BUILTIN_ICON_FONT font_material_symbols_20_4)
+    set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_128)
 elseif(CONFIG_BOARD_TYPE_DOIT_S3_AIBOX)
     set(BOARD_DIR "doit-s3-aibox")
 elseif(CONFIG_BOARD_TYPE_MIXGO_NOVA)
