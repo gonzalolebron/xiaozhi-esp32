@@ -21,12 +21,13 @@
 #define AUDIO_I2S_MIC_GPIO_SCK  GPIO_NUM_12  // BCLK
 #define AUDIO_I2S_MIC_GPIO_DIN  GPIO_NUM_11  // SD
 
-// --- MAX98357A amplifier — NOT WIRED YET ---
+// --- MAX98357A amplifier ---
 // Pins picked from the module's free ones. GPIO 26-37 avoided: on the N16R8
-// they are taken by the flash and the octal PSRAM.
-#define AUDIO_I2S_SPK_GPIO_BCLK GPIO_NUM_15
-#define AUDIO_I2S_SPK_GPIO_LRCK GPIO_NUM_16
-#define AUDIO_I2S_SPK_GPIO_DOUT GPIO_NUM_7
+// they are taken by the flash and the octal PSRAM. Moved to 17/18/16 for the
+// second board's PCB: the amplifier connects there now.
+#define AUDIO_I2S_SPK_GPIO_BCLK GPIO_NUM_17
+#define AUDIO_I2S_SPK_GPIO_LRCK GPIO_NUM_18
+#define AUDIO_I2S_SPK_GPIO_DOUT GPIO_NUM_16
 
 // The board's blue LED; in the previous YAML it meant a voice session was on.
 #define BUILTIN_LED_GPIO        GPIO_NUM_2
