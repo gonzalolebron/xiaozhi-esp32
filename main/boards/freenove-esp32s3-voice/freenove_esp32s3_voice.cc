@@ -12,6 +12,7 @@
 #include "button.h"
 #include "config.h"
 #include "led/gpio_led.h"
+#include "mcp_server.h"
 
 #include <esp_log.h>
 #include <driver/gpio.h>
@@ -447,6 +448,40 @@ private:
 
     }
 
+    // Waking her from outside, with nobody in the room saying anything.
+    //
+    // The gateway already knows how to ask for this — it sends an MCP call
+    // named self.remote_wakeup — but no upstream firmware implements it, in
+    // any commit. So it is ours.
+    //
+    // StartListening() and not WakeWordInvoke(): the latter reports a wake
+    // word to the server, and a made-up one would reach the model as if
+    // somebody had said it out loud. This opens the channel and listens,
+    // which is all that is wanted. From idle the board comes back to idle on
+    // its own once it has finished speaking.
+    //
+    // Reaching this is already narrow: the board only accepts MCP over its
+    // MQTT link to our own gateway, and that gateway's admin API listens on
+    // localhost only. Waking her means opening a microphone in a house, so
+    // both of those matter.
+    void InitializeTools() {
+        auto& mcp_server = McpServer::GetInstance();
+        mcp_server.AddTool(
+            "self.remote_wakeup",
+            "Despierta el dispositivo desde fuera, sin que nadie diga la palabra "
+            "de activación. Abre el canal de audio y se queda escuchando.",
+            PropertyList({
+                Property("reason", kPropertyTypeString, ""),
+                Property("action", kPropertyTypeString, "listen"),
+            }),
+            [](const PropertyList& properties) -> ReturnValue {
+                auto reason = properties["reason"].value<std::string>();
+                ESP_LOGI(TAG, "remote wakeup: %s", reason.c_str());
+                Application::GetInstance().StartListening();
+                return true;
+            });
+    }
+
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
@@ -462,6 +497,7 @@ public:
     FreenoveEsp32S3Voice() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializeSpi();
         InitializeLcdDisplay();
+        InitializeTools();
         InitializeButtons();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
