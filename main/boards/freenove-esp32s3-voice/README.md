@@ -24,16 +24,17 @@ nothing. It is a silent failure that has cost time once already. That is why
 the code pins `I2S_STD_SLOT_LEFT` on the codec instead of using the default
 stereo.
 
-### MAX98357A amplifier — pending
+### MAX98357A amplifier
 
 Pins picked from the free ones. **Avoid GPIO 26–37**: on the N16R8 module they
-are taken by the flash and the octal PSRAM.
+are taken by the flash and the octal PSRAM. On the second board these connect
+to 17/18/16 (the first board used 15/16/7).
 
 | MAX98357A | ESP32-S3 |
 |---|---|
-| BCLK | GPIO15 |
-| LRC | GPIO16 |
-| DIN | GPIO7 |
+| BCLK | GPIO17 |
+| LRC | GPIO18 |
+| DIN | GPIO16 |
 | VIN | 5V |
 | GND | GND |
 | SD | not connected (stays enabled) |
