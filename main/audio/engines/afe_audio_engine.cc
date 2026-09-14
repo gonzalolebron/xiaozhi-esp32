@@ -175,7 +175,9 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
             afe_config->wakenet_model_name_2 = wakenet_models[1];
         }
     }
-    afe_config->agc_init = false;
+    afe_config->agc_init = true;   // Sofia: the INMP441 needs gain. Without it the wake
+                                   // word is missed and the speech arrives as plain text;
+                                   // the ESPHome pipeline used auto_gain 31dBFS for this.
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
     ESP_LOGI(TAG, "Before AFE create: free=%u min=%u largest=%u",
