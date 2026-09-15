@@ -31,11 +31,12 @@ CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1536
 
 # LVGL Graphics
 CONFIG_LV_USE_SNAPSHOT=y
-# Builtin TLSF pool in PSRAM (lvgl_psram_pool.h). Keep the base pool small
-# enough for 2MB PSRAM boards; 8MB boards add extra pools in lcd_display.cc
-# (chunked to LV_MEM_SIZE — TLSF rejects a single add_pool larger than this).
-# Variants that set CONFIG_SPIRAM=n are switched back to CLIB malloc in
-# scripts/build.py; do not repeat that override on each board.
-CONFIG_LV_USE_BUILTIN_MALLOC=y
-# CONFIG_LV_USE_CLIB_MALLOC is not set
-CONFIG_LV_MEM_SIZE_KILOBYTES=1024
+# Sofia's fork: use the C library allocator, not the builtin TLSF pools.
+# A decoded 240x240 PNG is 230 KB and needs one contiguous block inside a
+# single pool; under fragmentation that allocation intermittently fails, the
+# PNG decode errors out and the image widget is drawn empty. On a face this
+# shows as eyes that vanish mid-blink while the small (18 KB) mouth keeps
+# working. SPIRAM_USE_MALLOC is on, so malloc serves from the PSRAM heap,
+# which has room. Upstream reference: lvgl/lvgl#5861.
+CONFIG_LV_USE_BUILTIN_MALLOC=n
+CONFIG_LV_USE_CLIB_MALLOC=y
