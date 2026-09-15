@@ -409,15 +409,12 @@ private:
         io_config.cs_gpio_num = DISPLAY_CS_PIN;
         io_config.dc_gpio_num = DISPLAY_DC_PIN;
         io_config.spi_mode = DISPLAY_SPI_MODE;
-        // 20 MHz instead of the reference board's 40. This is a PRECAUTION,
-        // not a measurement: 40 MHz was never actually tried on this wiring,
-        // and no stray pixels were ever observed. Do not read it as a finding.
-        //
-        // It is not free, either. A full 240x240 eye frame is 115 KB, which
-        // takes 46 ms at 20 MHz — longer than the 35 ms steps of the blink, so
-        // the animation runs slower than it was written to. At 40 MHz it would
-        // be 23 ms. Worth measuring on real hardware and raising if it holds.
-        io_config.pclk_hz = 20 * 1000 * 1000;
+        // 40 MHz. It sat at 20 while the board lived on a breadboard, as a
+        // precaution that was never verified: no stray pixels were ever seen at
+        // either speed. On the PCB that reason is gone, and the precaution was
+        // not free — a full 240x240 eye frame is 115 KB, which is 46 ms at
+        // 20 MHz against the 35 ms steps of the blink, and 23 ms at 40.
+        io_config.pclk_hz = 40 * 1000 * 1000;
         io_config.trans_queue_depth = 10;
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
