@@ -92,9 +92,12 @@ Two deliberate differences from the upstream reference board
 - **RES on 39, not on 45.** 45 is a strapping pin on the ESP32-S3: it selects
   the flash voltage, and a pull-up resistor on the module can leave the board
   unable to boot.
-- **SPI at 20 MHz, not 40.** A precaution taken because of the breadboard
-  wiring, never verified: 40 MHz was not tried and no glitches were seen. It
-  costs animation speed — see the comment in `freenove_esp32s3_voice.cc`.
+- **SPI at 40 MHz.** It started at 20 as a precaution against the breadboard
+  wiring, never verified: no glitches were ever seen at either speed. Once the
+  board moved to a PCB the precaution lost its reason, and it was not free — a
+  full 240x240 eye frame is 115 KB, which is 46 ms at 20 MHz against the 35 ms
+  steps of the blink, and 23 ms at 40. The blink is smoother at 40, with no
+  stray pixels.
 
 `vendor_config` is not passed either: the reference board's init commands are
 for a GC9107, and there they are assigned after the panel is created, so they
