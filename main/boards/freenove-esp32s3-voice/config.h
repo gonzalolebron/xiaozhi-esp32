@@ -63,9 +63,15 @@
 #define LCD_TYPE_GC9A01_SERIAL
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  240
+// The GC9A01 sits rotated 90 degrees counter-clockwise in the case (it is
+// round, so nothing keys its orientation). The controller turns the face back
+// upright: swapping X and Y and mirroring both axes is that 90 degree turn,
+// done by its scan order (MADCTL) at no cost. Rotating face_ in LVGL instead
+// redrew every frame in software, strip by strip, and the two eyes -- one above
+// the other in panel rows -- updated out of step, with a sluggish blink.
 #define DISPLAY_MIRROR_X true
-#define DISPLAY_MIRROR_Y false
-#define DISPLAY_SWAP_XY false
+#define DISPLAY_MIRROR_Y true
+#define DISPLAY_SWAP_XY true
 #define DISPLAY_INVERT_COLOR true
 #define DISPLAY_RGB_ORDER LCD_RGB_ELEMENT_ORDER_BGR
 #define DISPLAY_OFFSET_X 0
