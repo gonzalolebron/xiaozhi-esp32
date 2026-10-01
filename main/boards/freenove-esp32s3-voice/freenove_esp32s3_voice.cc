@@ -8,6 +8,8 @@
 #include <string>
 #include <atomic>
 #include <algorithm>
+#include <cmath>
+#include <esp_timer.h>
 #include "application.h"
 #include "button.h"
 #include "config.h"
@@ -174,6 +176,53 @@ public:
             [](lv_timer_t* t) {
                 static_cast<DrawnFace*>(lv_timer_get_user_data(t))->FollowVoice();
             }, 50, this);
+
+        MakeDescriptor(think_[0][0], eye_normal_up_png, eye_normal_up_png_len);
+        MakeDescriptor(think_[0][1], eye_normal_up2_png, eye_normal_up2_png_len);
+        MakeDescriptor(think_[0][2], eye_normal_think_png, eye_normal_think_png_len);
+        MakeDescriptor(think_[1][0], eye_listening_up_png, eye_listening_up_png_len);
+        MakeDescriptor(think_[1][1], eye_listening_up2_png, eye_listening_up2_png_len);
+        MakeDescriptor(think_[1][2], eye_listening_think_png, eye_listening_think_png_len);
+
+        // The thought cloud: four puffs and a flat base, all white, and three dark
+        // dots inside. Made once and hidden; the scene timer moves and sizes them.
+        for (auto*& o : puffs_) o = MakeDisc(0xF4F6F8);
+        cloud_base_ = MakeDisc(0xF4F6F8);
+        for (auto*& o : dots_) o = MakeDisc(0x000000);
+        ShowCloud(false);
+        // 33 ms: thirty frames a second for the cloud. Paused until she thinks.
+        scene_timer_ = lv_timer_create(
+            [](lv_timer_t* t) {
+                static_cast<DrawnFace*>(lv_timer_get_user_data(t))->StepScene();
+            }, 33, this);
+        lv_timer_pause(scene_timer_);
+    }
+
+    // What the server asks the face to show, besides the emotion of the mouth.
+    // Scenes are drawn HERE and chosen THERE: the board knows how to look
+    // thoughtful, the server knows when she is (principle 1: the board is an
+    // audio endpoint, not an orchestrator).
+    //
+    //   "thinking"  she looks up, narrows her eyes a little, and a thought cloud
+    //               with three dots rises from her forehead: the answer will take
+    //               a while (a web search, a slow tool)
+    //   "face"      back to the plain face; the cloud keeps rising and leaves
+    void SetScene(const std::string& name) {
+        DisplayLockGuard lock(this);
+        if (face_ == nullptr) return;
+        const int64_t now = NowMs();
+        if (name == "thinking") {
+            if (asleep_) return;               // nobody is there to be shown to
+            if (!thinking_ || think_end_ != 0) {
+                thinking_ = true;
+                think_start_ = now;
+                think_end_ = 0;
+                ShowCloud(true);
+                lv_timer_resume(scene_timer_);
+            }
+        } else if (name == "face") {
+            if (thinking_ && think_end_ == 0) think_end_ = now;
+        }
     }
 
     // The server sends an emotion with every reply. The drawn eyes have only one
@@ -267,6 +316,58 @@ private:
     bool eyelids_moving_ = false;
     int smooth_level_ = 0;
 
+    // Thinking: the eyes look up and narrow, a small cloud rises from the forehead.
+    enum { UP = 3, UP2 = 4, THINK = 5 };       // frame_ values past OPEN/HALF/CLOSED
+    lv_image_dsc_t think_[2][3]{};
+    lv_obj_t* puffs_[4]{};
+    lv_obj_t* cloud_base_ = nullptr;
+    lv_obj_t* dots_[3]{};
+    lv_timer_t* scene_timer_ = nullptr;
+    bool thinking_ = false;
+    bool in_blink_ = false;
+    int64_t think_start_ = 0;
+    int64_t think_end_ = 0;                    // 0 while still thinking
+
+    static int64_t NowMs() { return esp_timer_get_time() / 1000; }
+
+    static float Ease(float p) {                   // easeInOutCubic
+        return p < 0.5f ? 4 * p * p * p : 1 - std::pow(-2 * p + 2, 3) / 2;
+    }
+    static float Win(float v, float a, float b) {  // v from a to b, as 0..1
+        return std::min(1.0f, std::max(0.0f, (v - a) / (b - a)));
+    }
+
+    lv_obj_t* MakeDisc(uint32_t color) {
+        lv_obj_t* o = lv_obj_create(face_);
+        lv_obj_remove_style_all(o);
+        lv_obj_set_style_bg_color(o, lv_color_hex(color), 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+        return o;
+    }
+
+    // A disc by centre and radius, in pixels.
+    static void Disc(lv_obj_t* o, float cx, float cy, float r) {
+        int d = std::max(1, static_cast<int>(std::lround(2 * r)));
+        lv_obj_set_size(o, d, d);
+        lv_obj_set_pos(o, static_cast<int>(std::lround(cx - r)), static_cast<int>(std::lround(cy - r)));
+    }
+
+    void ShowCloud(bool on) {
+        auto set = [on](lv_obj_t* o) {
+            if (o == nullptr) return;
+            if (on) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+            else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        };
+        for (auto* o : puffs_) set(o);
+        set(cloud_base_);
+        for (auto* o : dots_) set(o);
+    }
+
+    // The frame she rests on between blinks: the plain eyes, or the thoughtful ones.
+    int RestFrame() const { return thinking_ ? static_cast<int>(THINK) : static_cast<int>(OPEN); }
+
     static void MakeDescriptor(lv_image_dsc_t& d, const uint8_t* png, size_t n) {
         lv_memzero(&d, sizeof(d));
         d.data = png;
@@ -299,6 +400,7 @@ private:
         const int c = listening_ ? 1 : 0;
         const lv_image_dsc_t* d = (f == HALF)   ? &half_[c]
                                 : (f == CLOSED) ? &closed_[c]
+                                : (f >= UP)     ? &think_[c][f - UP]
                                                  : &open_[c][gaze_];
         lv_image_set_src(eyes_, d);
     }
@@ -307,7 +409,7 @@ private:
     // again on every firing. With a fixed period the face beats like a metronome
     // and it reads as a machine immediately.
     void GlanceAside() {
-        if (eyes_ == nullptr || asleep_) return;
+        if (eyes_ == nullptr || asleep_ || thinking_) return;
         // Two glances in three come back to the centre, which is where it really
         // spends most of its time.
         static const uint8_t targets[] = {CENTER, CENTER, LEFT, RIGHT, DOWN};
@@ -327,6 +429,7 @@ private:
         // stopped and started: it is cheaper than tracking which timer is alive.
         if (eyes_ == nullptr || asleep_) return;
         step_ = 0;
+        in_blink_ = true;
         StepBlink();
         lv_timer_set_period(blink_timer_, NextBlink());
     }
@@ -357,10 +460,11 @@ private:
     }
 
     void StepBlink() {
-        static const uint8_t frames[] = {HALF, CLOSED, HALF, OPEN};
+        const uint8_t frames[] = {HALF, CLOSED, HALF, static_cast<uint8_t>(RestFrame())};
         static const uint32_t wait[] = {35, 55, 35, 0};
         if (step_ >= 4) {
             lv_timer_pause(seq_timer_);
+            in_blink_ = false;
             return;
         }
         ShowFrame(frames[step_]);
@@ -368,11 +472,77 @@ private:
         ++step_;
         if (ms == 0) {
             lv_timer_pause(seq_timer_);
+            in_blink_ = false;
             return;
         }
         lv_timer_set_period(seq_timer_, ms);
         lv_timer_reset(seq_timer_);
         lv_timer_resume(seq_timer_);
+    }
+
+    // One frame of the thinking scene. The cloud is born between the brows as a
+    // small bubble and inflates as it rises; inside, three dots swell one after
+    // another; when the answer arrives it keeps rising and leaves through the top.
+    // Everything is a function of time, so a late or skipped tick never drifts.
+    void StepScene() {
+        if (!thinking_) { lv_timer_pause(scene_timer_); return; }
+        const float since = static_cast<float>(NowMs() - think_start_);
+        const bool leaving = think_end_ != 0;
+        const float out = leaving ? static_cast<float>(NowMs() - think_end_) : -1.0f;
+
+        // The eyes: up, then narrowed, a frame at a time; and back, once she is done.
+        if (!asleep_ && !in_blink_ && !eyelids_moving_) {
+            int f;
+            if (!leaving) {
+                f = UP + std::min(2, static_cast<int>(since / 90));
+            } else if (out < 270) {
+                f = UP + 2 - std::min(2, static_cast<int>(out / 90));
+            } else {
+                f = OPEN;
+            }
+            if (f != frame_) ShowFrame(f);
+        }
+
+        const float grow = Ease(Win(since - 200, 0, 650));
+        if (grow <= 0) { ShowCloud(false); return; }
+        ShowCloud(true);
+        float cx = 120, cy = 98 + (46 - 98) * grow, sc = 0.08f + (1 - 0.08f) * grow;
+        if (leaving) {
+            const float up = Ease(Win(out, 0, 850));
+            cy -= up * 120;
+            sc *= 1 + up * 0.15f;
+            if (up >= 1) {                       // gone through the top
+                thinking_ = false;
+                ShowCloud(false);
+                lv_timer_pause(scene_timer_);
+                if (!asleep_ && frame_ != OPEN && !in_blink_) ShowFrame(OPEN);
+                return;
+            }
+        }
+        static const float PUFF[4][3] = {{-21, 4, 12}, {-6, -5, 15}, {10, -4, 14}, {24, 5, 11}};
+        for (int i = 0; i < 4; ++i) {
+            Disc(puffs_[i], cx + PUFF[i][0] * sc, cy + PUFF[i][1] * sc, PUFF[i][2] * sc);
+        }
+        // The flat base: a rounded bar under the puffs.
+        {
+            int w = std::max(2, static_cast<int>(std::lround(60 * sc)));
+            int h = std::max(2, static_cast<int>(std::lround(16 * sc)));
+            lv_obj_set_size(cloud_base_, w, h);
+            lv_obj_set_pos(cloud_base_, static_cast<int>(std::lround(cx - 30 * sc)),
+                           static_cast<int>(std::lround(cy - 2 * sc)));
+            lv_obj_set_style_radius(cloud_base_, h / 2, 0);
+        }
+        const float dots_in = Ease(Win(since - 750, 0, 300));
+        for (int i = 0; i < 3; ++i) {
+            float r = 2.2f;
+            if (!leaving) {
+                float ph = std::fmod(since / 900.0f - i / 3.0f + 3.0f, 1.0f);
+                r += 1.8f * std::max(0.0f, std::sin(ph * 6.2831853f));
+            }
+            Disc(dots_[i], cx + (i - 1) * 12 * sc, cy + 4 * sc, std::max(0.0f, r * sc * dots_in));
+            if (dots_in <= 0) lv_obj_add_flag(dots_[i], LV_OBJ_FLAG_HIDDEN);
+            else              lv_obj_remove_flag(dots_[i], LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     // Follows the level of the audio playing right now. Smoothed, because the raw
@@ -389,6 +559,7 @@ class FreenoveEsp32S3Voice : public WifiBoard {
 private:
     Button boot_button_;
     LcdDisplay* display_ = nullptr;
+    DrawnFace* face_display_ = nullptr;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -437,11 +608,12 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
-        display_ = new DrawnFace(panel_io, panel,
+        face_display_ = new DrawnFace(panel_io, panel,
                                      DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                      DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
                                      DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
                                      DISPLAY_SWAP_XY);
+        display_ = face_display_;
 
     }
 
@@ -475,6 +647,22 @@ private:
                 auto reason = properties["reason"].value<std::string>();
                 ESP_LOGI(TAG, "remote wakeup: %s", reason.c_str());
                 Application::GetInstance().StartListening();
+                return true;
+            });
+
+        // What the face shows besides the emotion: the server chooses, the board
+        // draws. Only reachable over the MQTT link to our own gateway, like the tool
+        // above; it changes what is on the screen and nothing else.
+        mcp_server.AddTool(
+            "self.face.scene",
+            "Muestra una escena en la cara: «thinking» (mira hacia arriba y le sale "
+            "una nubecita de pensar mientras busca) o «face» (vuelve a la cara).",
+            PropertyList({
+                Property("scene", kPropertyTypeString, "face"),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                auto scene = properties["scene"].value<std::string>();
+                if (face_display_ != nullptr) face_display_->SetScene(scene);
                 return true;
             });
     }

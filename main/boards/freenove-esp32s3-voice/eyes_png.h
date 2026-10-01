@@ -21,6 +21,12 @@ extern const uint8_t eye_normal_half_png[];
 extern const size_t eye_normal_half_png_len;
 extern const uint8_t eye_normal_closed_png[];
 extern const size_t eye_normal_closed_png_len;
+extern const uint8_t eye_normal_up_png[];
+extern const size_t eye_normal_up_png_len;
+extern const uint8_t eye_normal_up2_png[];
+extern const size_t eye_normal_up2_png_len;
+extern const uint8_t eye_normal_think_png[];
+extern const size_t eye_normal_think_png_len;
 extern const uint8_t eye_listening_png[];
 extern const size_t eye_listening_png_len;
 extern const uint8_t eye_listening_left_png[];
@@ -33,6 +39,12 @@ extern const uint8_t eye_listening_half_png[];
 extern const size_t eye_listening_half_png_len;
 extern const uint8_t eye_listening_closed_png[];
 extern const size_t eye_listening_closed_png_len;
+extern const uint8_t eye_listening_up_png[];
+extern const size_t eye_listening_up_png_len;
+extern const uint8_t eye_listening_up2_png[];
+extern const size_t eye_listening_up2_png_len;
+extern const uint8_t eye_listening_think_png[];
+extern const size_t eye_listening_think_png_len;
 
 #ifdef __cplusplus
 }
