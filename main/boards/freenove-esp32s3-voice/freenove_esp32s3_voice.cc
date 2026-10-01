@@ -79,6 +79,7 @@ public:
 // drops into a boot loop.
 #include "eyes_png.h"
 #include "mouth_png.h"
+#include "face_scenes.h"
 
 class DrawnFace : public SpiLcdDisplay {
 public:
@@ -196,6 +197,35 @@ public:
                 static_cast<DrawnFace*>(lv_timer_get_user_data(t))->StepScene();
             }, 33, this);
         lv_timer_pause(scene_timer_);
+
+        // The scenes: the face turned into a clock, a sun, a cloud, the rain. They
+        // draw above the bitmaps; while one is on, blinking, gaze and lip sync rest.
+        face::Hooks hooks;
+        hooks.eye_frame = [this](int f) { ShowFrame(f == 0 ? OPEN : f == 1 ? HALF : CLOSED); };
+        hooks.bitmap = [this](bool on) {
+            if (on) {
+                lv_obj_remove_flag(eyes_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
+                ShowMouth();
+            } else {
+                lv_obj_add_flag(eyes_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
+            }
+        };
+        hooks.suspend = [this](bool on) {
+            if (on) {
+                lv_timer_pause(blink_timer_); lv_timer_pause(gaze_timer_);
+                lv_timer_pause(lips_timer_); lv_timer_pause(seq_timer_);
+                in_blink_ = false; eyelids_moving_ = false;
+            } else {
+                lv_timer_resume(blink_timer_); lv_timer_resume(gaze_timer_);
+                lv_timer_resume(lips_timer_);
+            }
+        };
+        hooks.iris = [this]() {
+            return listening_ ? face::Col{52, 205, 90} : face::Col{92, 163, 242};
+        };
+        scenes_.Init(face_, hooks);
     }
 
     // What the server asks the face to show, besides the emotion of the mouth.
@@ -207,12 +237,13 @@ public:
     //               with three dots rises from her forehead: the answer will take
     //               a while (a web search, a slow tool)
     //   "face"      back to the plain face; the cloud keeps rising and leaves
-    void SetScene(const std::string& name) {
+    void SetScene(const std::string& name, const std::string& text = "", int hour = -1,
+                  int minute = -1, int second = -1) {
         DisplayLockGuard lock(this);
         if (face_ == nullptr) return;
         const int64_t now = NowMs();
         if (name == "thinking") {
-            if (asleep_) return;               // nobody is there to be shown to
+            if (asleep_ || scenes_.Active()) return;   // nobody there; or already showing a scene
             if (!thinking_ || think_end_ != 0) {
                 thinking_ = true;
                 think_start_ = now;
@@ -222,6 +253,20 @@ public:
             }
         } else if (name == "face") {
             if (thinking_ && think_end_ == 0) think_end_ = now;
+            if (scenes_.Active()) scenes_.Return(now);
+        } else {
+            face::SceneArgs a;
+            if      (name == "clock") a.scene = face::CLOCK_SCENE;
+            else if (name == "sun")   a.scene = face::SUN_SCENE;
+            else if (name == "cloud") a.scene = face::CLOUD_SCENE;
+            else if (name == "rain")  a.scene = face::RAIN_SCENE;
+            else return;
+            if (asleep_) return;
+            // the thought cloud gives way to the scene at once
+            if (thinking_) { thinking_ = false; ShowCloud(false); if (frame_ >= UP) ShowFrame(OPEN); }
+            a.text = text; a.hour = hour; a.minute = minute; a.second = second;
+            scenes_.Start(a, now);
+            lv_timer_resume(scene_timer_);
         }
     }
 
@@ -280,6 +325,8 @@ public:
         if (thinking_ && think_end_ == 0 && (speaking_now || asleep_)) {
             think_end_ = NowMs();
         }
+        scenes_.NoteSpeaking(speaking_now, NowMs());
+        if (asleep_ && scenes_.Active()) scenes_.Abort();      // the conversation closed
         if (thinking_ && asleep_) {
             thinking_ = false;
             ShowCloud(false);
@@ -335,8 +382,11 @@ private:
     lv_obj_t* cloud_base_ = nullptr;
     lv_obj_t* dots_[3]{};
     lv_timer_t* scene_timer_ = nullptr;
+    face::Scenes scenes_;
     bool thinking_ = false;
     bool in_blink_ = false;
+    float scene_level_ = 0;
+    int64_t tick_n_ = 0, tick_sum_ = 0, tick_max_ = 0, tick_report_ = 0;
     int64_t think_start_ = 0;
     int64_t think_end_ = 0;                    // 0 while still thinking
 
@@ -497,6 +547,23 @@ private:
     // another; when the answer arrives it keeps rising and leaves through the top.
     // Everything is a function of time, so a late or skipped tick never drifts.
     void StepScene() {
+        if (scenes_.Active()) {
+            const float level = static_cast<float>(g_voice_level.load(std::memory_order_relaxed)) / 100.0f;
+            scene_level_ = (scene_level_ * 6 + level * 4) / 10;
+            const int64_t t0 = esp_timer_get_time();
+            scenes_.Tick(NowMs(), scene_level_);
+            // How much the scenes cost: frames per second and microseconds per frame,
+            // every two seconds. The wake word shares this processor.
+            const int64_t us = esp_timer_get_time() - t0;
+            ++tick_n_; tick_sum_ += us; tick_max_ = std::max(tick_max_, us);
+            if (t0 / 1000 - tick_report_ >= 2000) {
+                ESP_LOGI(TAG, "scene: %d frames in 2 s, %lld us each on average, %lld us at most",
+                         static_cast<int>(tick_n_), static_cast<long long>(tick_sum_ / std::max<int64_t>(1, tick_n_)),
+                         static_cast<long long>(tick_max_));
+                tick_n_ = 0; tick_sum_ = 0; tick_max_ = 0; tick_report_ = t0 / 1000;
+            }
+            return;
+        }
         if (!thinking_) { lv_timer_pause(scene_timer_); return; }
         const float since = static_cast<float>(NowMs() - think_start_);
         // A safety net: a minute is longer than any search; if the server never
@@ -670,14 +737,24 @@ private:
         // above; it changes what is on the screen and nothing else.
         mcp_server.AddTool(
             "self.face.scene",
-            "Muestra una escena en la cara: «thinking» (mira hacia arriba y le sale "
-            "una nubecita de pensar mientras busca) o «face» (vuelve a la cara).",
+            "Muestra una escena en la cara: «thinking» (mira hacia arriba y le sale una "
+            "nubecita de pensar mientras busca), «clock» (se vuelve un reloj; hour, minute y "
+            "second son la hora), «sun», «cloud» o «rain» (se vuelve el tiempo; text es la "
+            "temperatura, por ejemplo 24°) o «face» (vuelve a la cara).",
             PropertyList({
                 Property("scene", kPropertyTypeString, "face"),
+                Property("text", kPropertyTypeString, ""),
+                Property("hour", kPropertyTypeInteger, -1, -1, 23),
+                Property("minute", kPropertyTypeInteger, -1, -1, 59),
+                Property("second", kPropertyTypeInteger, -1, -1, 59),
             }),
             [this](const PropertyList& properties) -> ReturnValue {
                 auto scene = properties["scene"].value<std::string>();
-                if (face_display_ != nullptr) face_display_->SetScene(scene);
+                auto text = properties["text"].value<std::string>();
+                int hour = properties["hour"].value<int>();
+                int minute = properties["minute"].value<int>();
+                int second = properties["second"].value<int>();
+                if (face_display_ != nullptr) face_display_->SetScene(scene, text, hour, minute, second);
                 return true;
             });
     }
