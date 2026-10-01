@@ -274,6 +274,18 @@ public:
             StepEyelids();
         }
 
+        // Thinking ends by itself when she starts to speak, so the server only has to
+        // say when it begins; and it ends at once if the conversation closes.
+        bool speaking_now = (strcmp(status, Lang::Strings::SPEAKING) == 0);
+        if (thinking_ && think_end_ == 0 && (speaking_now || asleep_)) {
+            think_end_ = NowMs();
+        }
+        if (thinking_ && asleep_) {
+            thinking_ = false;
+            ShowCloud(false);
+            lv_timer_pause(scene_timer_);
+        }
+
         bool listening = (strcmp(status, Lang::Strings::LISTENING) == 0);
         if (listening != listening_) {
             listening_ = listening;
@@ -487,6 +499,9 @@ private:
     void StepScene() {
         if (!thinking_) { lv_timer_pause(scene_timer_); return; }
         const float since = static_cast<float>(NowMs() - think_start_);
+        // A safety net: a minute is longer than any search; if the server never
+        // said it was over, she does not stay thoughtful for ever.
+        if (think_end_ == 0 && since > 60000) think_end_ = NowMs();
         const bool leaving = think_end_ != 0;
         const float out = leaving ? static_cast<float>(NowMs() - think_end_) : -1.0f;
 
