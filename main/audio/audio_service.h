@@ -170,6 +170,10 @@ private:
     int decoder_frame_size_ = 0;
     DebugStatistics debug_statistics_;
     int64_t last_encode_drop_log_time_ = 0;
+    int64_t mic_sum_ = 0;          // Sofia: microphone level over the last 10 s
+    int mic_peak_ = 0;
+    size_t mic_count_ = 0;
+    int64_t mic_logged_us_ = 0;
     srmodel_list_t* models_list_ = nullptr;
 
     EventGroupHandle_t event_group_;

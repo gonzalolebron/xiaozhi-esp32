@@ -80,6 +80,7 @@ public:
 #include "eyes_png.h"
 #include "mouth_png.h"
 #include "face_scenes.h"
+#include "sofia_netlog.h"
 
 class DrawnFace : public SpiLcdDisplay {
 public:
@@ -785,6 +786,7 @@ private:
 
 public:
     FreenoveEsp32S3Voice() : boot_button_(BOOT_BUTTON_GPIO) {
+        sofia_netlog::Start();     // the log also goes to the server (spec 018)
         InitializeSpi();
         InitializeLcdDisplay();
         InitializeTools();

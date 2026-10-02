@@ -311,6 +311,29 @@ void AudioService::AudioInputTask() {
             int samples = 160;  // 10ms
             std::vector<int16_t> data;
             if (ReadAudioData(data, 16000, samples)) {
+                // Sofia (spec 018): what the microphone hears, and whether the wake
+                // word was even listening, every 10 s. A word that is NOT detected
+                // leaves no trace of its own; this is how "she heard nothing" is told
+                // from "she heard and did not understand".
+                for (int16_t v : data) {
+                    int a = v < 0 ? -static_cast<int>(v) : v;
+                    mic_sum_ += a;
+                    if (a > mic_peak_) mic_peak_ = a;
+                }
+                mic_count_ += data.size();
+                int64_t now_us = esp_timer_get_time();
+                if (now_us - mic_logged_us_ >= 10000000) {
+                    if (mic_count_ > 0) {
+                        ESP_LOGI(TAG, "mic: avg %d peak %d, wake word %s, %d samples",
+                                 static_cast<int>(mic_sum_ / mic_count_), mic_peak_,
+                                 (bits & AS_EVENT_WAKE_WORD_RUNNING) ? "listening" : "NOT listening",
+                                 static_cast<int>(mic_count_));
+                    }
+                    mic_sum_ = 0;
+                    mic_peak_ = 0;
+                    mic_count_ = 0;
+                    mic_logged_us_ = now_us;
+                }
                 audio_engine_->Feed(std::move(data));
                 continue;
             }
