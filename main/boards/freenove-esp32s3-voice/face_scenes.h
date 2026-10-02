@@ -1,4 +1,5 @@
-// Sofia's scenes: the face that turns into a clock, a sun, a cloud, the rain.
+// Sofia's scenes: the face that turns into a clock, a sun, a cloud, the rain, or
+// music.
 //
 // She closes her eyes; the drawn lids hand over to geometric ones, which inflate
 // into the pieces of the scene; what the scene needs and the face has not got
@@ -17,6 +18,12 @@
 //
 // The numbers on the face are strokes (face_digits.h, drawn by us): the board
 // carries one small font and the project takes no third-party fonts.
+//
+// Music is the one scene that stays: the other scenes go back to the face a few
+// seconds after she speaks, but music stays while it plays, also out of a
+// session, until the server says it stopped. The lids become the two heads of a
+// pair of quavers, the mouth the beam; the stems grow between them, the pair
+// rocks on the beat and small notes rise out of the beam.
 #pragma once
 
 #include <algorithm>
@@ -38,6 +45,8 @@ static const Col SUN_COLOR = {255, 196, 61};
 static const Col CLOUD = {214, 224, 235};
 static const Col RAIN = {150, 168, 190};
 static const Col DROP = {127, 182, 255};
+// The small notes that rise out of the beam, in turn.
+static const Col NOTE_COLORS[4] = {{92, 163, 242}, {52, 205, 90}, {255, 150, 190}, {255, 196, 61}};
 
 inline float Lerp(float a, float b, float t) { return a + (b - a) * t; }
 inline Col Mix(Col a, Col b, float t) { return {Lerp(a.r, b.r, t), Lerp(a.g, b.g, t), Lerp(a.b, b.b, t)}; }
@@ -53,7 +62,7 @@ inline float LerpAng(float a, float b, float t) {
     return a + d * t;
 }
 
-enum Scene { FACE_SCENE = 0, CLOCK_SCENE, SUN_SCENE, CLOUD_SCENE, RAIN_SCENE };
+enum Scene { FACE_SCENE = 0, CLOCK_SCENE, SUN_SCENE, CLOUD_SCENE, RAIN_SCENE, MUSIC_SCENE };
 
 // ---------------------------------------------------------------- the pieces
 struct Ell { float x, y, rx, ry; Col c; };                 // the lids, the sun, a puff
@@ -61,7 +70,7 @@ struct Rr  { float x, y, rx, ry, len, ang; Col c; };       // the right lid; may
 struct Cap { float x, y, len, ang, w; Col c; };            // the mouth's line: a hand, an underline, a base
 struct Cir { float x, y, r; Col c; };                      // lives in the mouth until the cloud needs it
 struct Pose { Ell L; Rr R; Cap M; Cir P; };
-struct Fx { float rays = 0, ticks = 0, sec = 0, rain = 0; };
+struct Fx { float rays = 0, ticks = 0, sec = 0, rain = 0, music = 0; };
 
 struct Target {
     Pose pose;
@@ -119,6 +128,14 @@ inline Target TargetFor(const SceneArgs& a, float seconds_into_day) {
         t.fx.rain = a.scene == RAIN_SCENE ? 1.0f : 0.0f; t.beat = true;
         t.has_text = !a.text.empty(); t.text = a.text;
         t.text_y = 184; t.text_from_y = 136; t.clip_top = 151; t.clip_bot = 240; t.text_h = 26;
+    } else if (a.scene == MUSIC_SCENE) {
+        // A pair of quavers: the lids are the heads, the mouth the beam. The
+        // heads stay ellipses (a Disc cannot tilt), which reads as notes anyway.
+        t.pose.L = {88, 166, 17, 13, WHITE};
+        t.pose.R = {158, 154, 17, 13, 0, 0, WHITE};
+        t.pose.M = {103, 84, 71.02f, -0.16991f, 5, WHITE};      // (103,84) to (173,72)
+        t.pose.P = {120, 120, 0, WHITE};
+        t.fx.music = 1;
     }
     return t;
 }
@@ -269,6 +286,8 @@ public:
     void Init(lv_obj_t* parent, Hooks hooks) {
         hooks_ = std::move(hooks);
         for (auto& d : drops_) d.line.Make(parent);
+        for (auto& n : notes_) { n.head.Make(parent); n.stem.Make(parent); n.flag.Make(parent); }
+        stem_[0].Make(parent); stem_[1].Make(parent);
         text_clip_ = lv_obj_create(parent);
         lv_obj_remove_style_all(text_clip_);
         lv_obj_remove_flag(text_clip_, LV_OBJ_FLAG_SCROLLABLE);
@@ -287,10 +306,13 @@ public:
 
     bool Active() const { return phase_ != IDLE; }
     Phase phase() const { return phase_; }
+    Scene scene() const { return scene_; }
 
     // She is asked for a scene. From the face it opens (LEAVING); from another
     // scene it changes in place (SWAPPING); "face" closes it (RETURNING).
-    void Start(const SceneArgs& a, int64_t now) {
+    // closed: she starts with her eyes already shut (out of a session).
+    void Start(const SceneArgs& a, int64_t now, bool closed = false) {
+        start_closed_ = closed;
         args_ = a;
         base_s_ = (a.hour >= 0 && a.minute >= 0)
                       ? a.hour * 3600.0f + a.minute * 60.0f + std::max(0, a.second)
@@ -341,7 +363,7 @@ public:
 
         switch (phase_) {
         case LEAVING:
-            frame = p < .05f ? 0 : p < .10f ? 1 : 2;
+            frame = start_closed_ ? 2 : p < .05f ? 0 : p < .10f ? 1 : 2;
             bmp = 1 - Ease(Win(p, .12f, .22f));
             bitmap = bmp > 0.5f;
             brow = 1 - Ease(Win(p, .20f, .34f));
@@ -377,15 +399,15 @@ public:
         // The extras: the old scene's go back first, the new one's come out last;
         // one that both share (cloud to rain) just changes in place.
         Fx fx;
-        float fnow[4], ffrom[4] = {from_.fx.rays, from_.fx.ticks, from_.fx.sec, from_.fx.rain};
-        float ftgt[4] = {to.fx.rays, to.fx.ticks, to.fx.sec, to.fx.rain};
-        for (int i = 0; i < 4; ++i) {
+        float fnow[5], ffrom[5] = {from_.fx.rays, from_.fx.ticks, from_.fx.sec, from_.fx.rain, from_.fx.music};
+        float ftgt[5] = {to.fx.rays, to.fx.ticks, to.fx.sec, to.fx.rain, to.fx.music};
+        for (int i = 0; i < 5; ++i) {
             const float out = ffrom[i] * (1 - extras_out), in = ftgt[i] * extras_in;
             fnow[i] = (phase_ == STEADY) ? ftgt[i]
                       : (ffrom[i] > 0 && ftgt[i] > 0) ? Lerp(ffrom[i], ftgt[i], pieces)
                                                       : std::max(out, in);
         }
-        fx.rays = fnow[0]; fx.ticks = fnow[1]; fx.sec = fnow[2]; fx.rain = fnow[3];
+        fx.rays = fnow[0]; fx.ticks = fnow[1]; fx.sec = fnow[2]; fx.rain = fnow[3]; fx.music = fnow[4];
 
         // Phase changes.
         if (p >= 1.0f && phase_ != STEADY) {
@@ -411,7 +433,8 @@ public:
 
         // Back to the face by itself: a few seconds after she finished speaking
         // (or after the scene opened if she never said a word), never more than 40 s.
-        if (phase_ == STEADY) {
+        // Not music: it stays while it plays, and the server says when it stopped.
+        if (phase_ == STEADY && scene_ != MUSIC_SCENE) {
             const int64_t quiet_since = std::max(steady_t_, spoke_until_);
             if ((!speaking_ && now - quiet_since > 5500) || now - steady_t_ > 40000) Return(now);
         }
@@ -426,6 +449,7 @@ public:
 private:
     struct Snapshot { Pose pose; Fx fx; };
     struct Drop { Line line; float x = 0, y = 999, v = 0; };
+    struct Note { Disc head; Line stem, flag; float x0 = 0, y = 999, v = 0, ph = 0; Col c = WHITE; };
     struct TextState {
         std::string str;
         bool live = false;
@@ -443,10 +467,14 @@ private:
     SceneArgs args_;
     int64_t t0_ = 0, steady_t_ = 0, spoke_until_ = 0, base_t_ = 0;
     float base_s_ = 12 * 3600.0f;
-    bool speaking_ = false;
+    bool speaking_ = false, start_closed_ = false;
     Snapshot from_{FacePose(), Fx{}}, cur_{FacePose(), Fx{}};
 
     Drop drops_[8];
+    Note notes_[4];
+    Line stem_[2];
+    int64_t next_note_ = 0;
+    int note_k_ = 0;
     Line rays_[10], ticks_[12], sec_, sec_tail_, brow_[2], Rhand_, M_;
     Disc P_, R_, L_;
     lv_obj_t* text_clip_ = nullptr;
@@ -458,6 +486,8 @@ private:
 
     void HideAll() {
         for (auto& d : drops_) d.line.Hide();
+        for (auto& n : notes_) { n.y = 999; n.head.Set(0, 0, 0, 0, WHITE); n.stem.Hide(); n.flag.Hide(); }
+        stem_[0].Hide(); stem_[1].Hide();
         for (auto& r : rays_) r.Hide();
         for (auto& t : ticks_) t.Hide();
         sec_.Hide(); sec_tail_.Hide(); Rhand_.Hide(); M_.Hide();
@@ -528,10 +558,32 @@ private:
             d.line.Seg(d.x, d.y, d.x - 3, d.y + 10, 3, DROP);
         }
 
+        // Music: small notes rise out of the beam, sway, and leave through the top.
+        if (fx.music > 0.6f && now >= next_note_) {
+            for (auto& n : notes_) if (n.y > 900) {
+                n.x0 = 104 + static_cast<float>(std::rand() % 68);
+                n.y = 70; n.v = 26 + static_cast<float>(std::rand() % 10);
+                n.ph = static_cast<float>(std::rand() % 628) / 100.0f;
+                n.c = NOTE_COLORS[note_k_++ % 4];
+                break;
+            }
+            next_note_ = now + 950;
+        }
+        for (auto& n : notes_) {
+            if (n.y > 900) { n.head.Set(0, 0, 0, 0, WHITE); n.stem.Hide(); n.flag.Hide(); continue; }
+            n.y -= n.v * dt;
+            if (n.y < 14) { n.y = 999; continue; }
+            const float x = n.x0 + std::sin(static_cast<float>(now) / 420.0f + n.ph) * 7;
+            n.head.Set(x, n.y, 6, 4.5f, n.c);
+            n.stem.Seg(x + 5, n.y - 1, x + 5, n.y - 17, 2.5f, n.c);
+            n.flag.Seg(x + 5, n.y - 17, x + 11, n.y - 11, 2.5f, n.c);
+        }
+
         // The text: under every piece, rolling out from behind the one it belongs to.
         UpdateText(now, to, extras_in);
 
         if (!geo) {
+            stem_[0].Hide(); stem_[1].Hide();
             for (auto& r : rays_) r.Hide();
             for (auto& t : ticks_) t.Hide();
             sec_.Hide(); sec_tail_.Hide(); Rhand_.Hide(); M_.Hide();
@@ -541,6 +593,34 @@ private:
         }
 
         const Ell& L = pz.L; const Rr& R = pz.R; const Cap& M = pz.M; const Cir& P = pz.P;
+
+        if (fx.music > 0.001f) {
+            // The pair rocks on the beat, the heads swell in turn. It knows no
+            // tempo (the music plays on another speaker), so the beat is its own.
+            const float tt = static_cast<float>(now);
+            const float bob = std::sin(tt / 111.0f) * 4 * fx.music;
+            const float sl = 1 + 0.07f * fx.music * std::max(0.0f, std::sin(tt / 222.0f));
+            const float sr = 1 + 0.07f * fx.music * std::max(0.0f, -std::sin(tt / 222.0f));
+            P_.Set(P.x, P.y + bob, P.r, P.r, P.c);
+            // The stems grow from the heads up to the beam.
+            const float tn = std::fabs(std::cos(M.ang)) > 1e-3f ? std::tan(M.ang) : 0.0f;
+            const float hx[2] = {L.x, R.x}, hy[2] = {L.y, R.y}, hr[2] = {L.rx, R.rx};
+            for (int i = 0; i < 2; ++i) {
+                const float sx = hx[i] + hr[i] - 2, top = M.y + tn * (sx - M.x), y0 = hy[i] - 3;
+                stem_[i].Seg(sx, y0 + bob, sx, Lerp(y0, top, fx.music) + bob, 5, WHITE);
+            }
+            Rhand_.Hide();
+            R_.Set(R.x, R.y + bob, R.rx * sr, R.ry * sr, R.c);
+            M_.Seg(M.x, M.y + bob, M.x + std::cos(M.ang) * M.len, M.y + std::sin(M.ang) * M.len + bob, 2 * M.w, M.c);
+            L_.Set(L.x, L.y + bob, L.rx * sl, L.ry * sl, L.c);
+            for (auto& r : rays_) r.Hide();
+            for (auto& t : ticks_) t.Hide();
+            sec_.Hide(); sec_tail_.Hide();
+            if (brow > 0.001f) { Brow(0, brow); Brow(1, brow); }
+            else { brow_[0].Hide(); brow_[1].Hide(); }
+            return;
+        }
+        stem_[0].Hide(); stem_[1].Hide();
 
         if (fx.rays > 0.001f) {
             const float rot = static_cast<float>(now) / 4000.0f, ext = fx.rays * (18 + beat * 10);
