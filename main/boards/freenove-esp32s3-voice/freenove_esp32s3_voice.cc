@@ -244,14 +244,13 @@ public:
         const int64_t now = NowMs();
         if (name == "thinking") {
             if (asleep_ || scenes_.Active()) return;   // nobody there; or already showing a scene
-            if (!thinking_ || think_end_ != 0) {
-                thinking_ = true;
-                think_start_ = now;
-                think_end_ = 0;
-                ShowCloud(true);
-                lv_timer_resume(scene_timer_);
-            }
+            // The device's "speaking" state starts when the server opens the turn, which
+            // is BEFORE a tool runs and long before any sound, so it says nothing about
+            // whether she is talking. The server says when the wait is over ("face").
+            ESP_LOGI(TAG, "thinking asked (speaking=%d): cloud now", speaking_ ? 1 : 0);
+            BeginThinking(now);
         } else if (name == "face") {
+            ESP_LOGI(TAG, "face asked (cloud up=%d)", thinking_ ? 1 : 0);
             if (thinking_ && think_end_ == 0) think_end_ = now;
             if (scenes_.Active()) scenes_.Return(now);
         } else {
@@ -319,10 +318,11 @@ public:
             StepEyelids();
         }
 
-        // Thinking ends by itself when she starts to speak, so the server only has to
-        // say when it begins; and it ends at once if the conversation closes.
+        // Thinking ends when the server says so ("face") or at once if the
+        // conversation closes. Not on "speaking": that state opens the turn, before
+        // any tool runs.
         bool speaking_now = (strcmp(status, Lang::Strings::SPEAKING) == 0);
-        if (thinking_ && think_end_ == 0 && (speaking_now || asleep_)) {
+        if (thinking_ && think_end_ == 0 && asleep_) {
             think_end_ = NowMs();
         }
         scenes_.NoteSpeaking(speaking_now, NowMs());
@@ -342,6 +342,10 @@ public:
         bool speaking = (strcmp(status, Lang::Strings::SPEAKING) == 0);
         if (speaking == speaking_) return;
         speaking_ = speaking;
+        ESP_LOGI(TAG, "speaking %d (cloud up=%d, asleep=%d)", speaking ? 1 : 0,
+                 thinking_ ? 1 : 0, asleep_ ? 1 : 0);
+        // Her turn ended: whatever she was waiting for is over, so the cloud goes.
+        if (!speaking && thinking_ && think_end_ == 0) think_end_ = NowMs();
         // The mouth starts CLOSED when speech begins: the audio opens it when sound
         // really comes out, not the notice that it is about to.
         smooth_level_ = 0;
@@ -425,6 +429,15 @@ private:
         for (auto* o : puffs_) set(o);
         set(cloud_base_);
         for (auto* o : dots_) set(o);
+    }
+
+    void BeginThinking(int64_t now) {
+        if (thinking_ && think_end_ == 0) return;
+        thinking_ = true;
+        think_start_ = now;
+        think_end_ = 0;
+        ShowCloud(true);
+        lv_timer_resume(scene_timer_);
     }
 
     // The frame she rests on between blinks: the plain eyes, or the thoughtful ones.
