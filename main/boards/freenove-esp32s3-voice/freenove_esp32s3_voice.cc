@@ -202,7 +202,8 @@ public:
         // The scenes: the face turned into a clock, a sun, a cloud, the rain. They
         // draw above the bitmaps; while one is on, blinking, gaze and lip sync rest.
         face::Hooks hooks;
-        hooks.eye_frame = [this](int f) { ShowFrame(f == 0 ? OPEN : f == 1 ? HALF : CLOSED); };
+        // Out of a session her eyes stay shut, also when a scene hands the face back.
+        hooks.eye_frame = [this](int f) { ShowFrame(asleep_ || f == 2 ? CLOSED : f == 1 ? HALF : OPEN); };
         hooks.bitmap = [this](bool on) {
             if (on) {
                 lv_obj_remove_flag(eyes_, LV_OBJ_FLAG_HIDDEN);
@@ -254,6 +255,16 @@ public:
             ESP_LOGI(TAG, "face asked (cloud up=%d)", thinking_ ? 1 : 0);
             if (thinking_ && think_end_ == 0) think_end_ = now;
             if (scenes_.Active()) scenes_.Return(now);
+        } else if (name == "music") {
+            // Music stays while it plays, also out of a session: the server says
+            // when it starts and when it stops ("music_off"). "face" does not end it.
+            ESP_LOGI(TAG, "music on (asleep=%d)", asleep_ ? 1 : 0);
+            music_on_ = true;
+            StartMusic(now);
+        } else if (name == "music_off") {
+            ESP_LOGI(TAG, "music off");
+            music_on_ = false;
+            if (scenes_.Active() && scenes_.scene() == face::MUSIC_SCENE) scenes_.Return(now);
         } else {
             face::SceneArgs a;
             if      (name == "clock") a.scene = face::CLOCK_SCENE;
@@ -268,6 +279,17 @@ public:
             scenes_.Start(a, now);
             lv_timer_resume(scene_timer_);
         }
+    }
+
+    // The music scene, from wherever the face is: shut eyes out of a session.
+    void StartMusic(int64_t now) {
+        if (scenes_.Active() && scenes_.scene() == face::MUSIC_SCENE &&
+            scenes_.phase() != face::Scenes::RETURNING) return;
+        if (thinking_) { thinking_ = false; ShowCloud(false); if (frame_ >= UP) ShowFrame(OPEN); }
+        face::SceneArgs a;
+        a.scene = face::MUSIC_SCENE;
+        scenes_.Start(a, now, asleep_);
+        lv_timer_resume(scene_timer_);
     }
 
     // The server sends an emotion with every reply. The drawn eyes have only one
@@ -312,6 +334,7 @@ public:
                          (strcmp(status, Lang::Strings::SPEAKING) == 0) ||
                          (strcmp(status, Lang::Strings::CONNECTING) == 0);
         bool asleep = !in_session;
+        const bool woke = asleep_ && !asleep;
         if (asleep != asleep_) {
             asleep_ = asleep;
             eyelids_moving_ = true;
@@ -327,7 +350,10 @@ public:
             think_end_ = NowMs();
         }
         scenes_.NoteSpeaking(speaking_now, NowMs());
-        if (asleep_ && scenes_.Active()) scenes_.Abort();      // the conversation closed
+        const bool music_shown = scenes_.Active() && scenes_.scene() == face::MUSIC_SCENE;
+        if (asleep_ && scenes_.Active() && !(music_on_ && music_shown)) scenes_.Abort();   // the conversation closed
+        if (asleep_ && music_on_ && !scenes_.Active()) StartMusic(NowMs());   // back to the music
+        if (woke && music_shown) scenes_.Return(NowMs());      // a conversation: she needs her face
         if (thinking_ && asleep_) {
             thinking_ = false;
             ShowCloud(false);
@@ -389,6 +415,7 @@ private:
     lv_timer_t* scene_timer_ = nullptr;
     face::Scenes scenes_;
     bool thinking_ = false;
+    bool music_on_ = false;        // the server said music is playing (spec 021)
     bool in_blink_ = false;
     float scene_level_ = 0;
     int64_t tick_n_ = 0, tick_sum_ = 0, tick_max_ = 0, tick_report_ = 0;
@@ -578,6 +605,8 @@ private:
             }
             return;
         }
+        // The face came back for a conversation that is over: the music is still on.
+        if (music_on_ && asleep_) { StartMusic(NowMs()); return; }
         if (!thinking_) { lv_timer_pause(scene_timer_); return; }
         const float since = static_cast<float>(NowMs() - think_start_);
         // A safety net: a minute is longer than any search; if the server never
@@ -754,7 +783,9 @@ private:
             "Muestra una escena en la cara: «thinking» (mira hacia arriba y le sale una "
             "nubecita de pensar mientras busca), «clock» (se vuelve un reloj; hour, minute y "
             "second son la hora), «sun», «cloud» o «rain» (se vuelve el tiempo; text es la "
-            "temperatura, por ejemplo 24°) o «face» (vuelve a la cara).",
+            "temperatura, por ejemplo 24°), «music» (se vuelve notas musicales y se queda "
+            "mientras suena música, también fuera de una conversación), «music_off» (la "
+            "música paró) o «face» (vuelve a la cara).",
             PropertyList({
                 Property("scene", kPropertyTypeString, "face"),
                 Property("text", kPropertyTypeString, ""),
