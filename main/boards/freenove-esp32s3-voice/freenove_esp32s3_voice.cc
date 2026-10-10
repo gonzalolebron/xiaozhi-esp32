@@ -7,6 +7,9 @@
 #include <cstring>
 #include <string>
 #include <atomic>
+#include <mutex>
+#include <vector>
+#include <utility>
 #include <algorithm>
 #include <cmath>
 #include <esp_timer.h>
@@ -36,11 +39,117 @@
 // actually comes out, and move WITH the voice instead of at a fixed rate.
 static std::atomic<int> g_voice_level{0};
 
-// OutputData is virtual and this board is what builds the codec, so the hook
-// fits here without patching anything in audio_service.
+// The echo reference, in software.
+//
+// The speaker sits against the microphone, so while she talks the microphone is
+// saturated with her own voice and a "Sofía" on top of it cannot be heard. The
+// AFE can subtract what the speaker plays if it is given that signal as a second
+// channel ("MR"). Other boards wire the reference through the codec chip; here
+// both ends are plain I2S and the firmware itself generates what goes out, so the
+// reference is simply a copy of it, kept on a timeline and handed back aligned.
+//
+// Timeline: 16 kHz samples, counted by the microphone. OutputData stamps each chunk at
+// the moment it is handed to the amplifier (silence in the gaps); InputData asks
+// for the stretch that lies kRefDelayMs behind the microphone frame it just read.
+// kRefDelayMs covers the I2S buffers on both sides plus the flight of the sound,
+// and it was measured, not guessed (spec 023).
+// #define SOFIA_AEC_LEVELS  // logs mic / reference / AFE output levels every 2 s
+// #define SOFIA_AEC_PROBE  // logs the delay that lines the reference up with the mic
+#ifndef SOFIA_AEC_PLAYING_SHIFT
+#define SOFIA_AEC_PLAYING_SHIFT 16
+#endif
+#ifndef SOFIA_AEC_REF_DELAY_MS
+#define SOFIA_AEC_REF_DELAY_MS 40
+#endif
+
+class EchoReference {
+public:
+    static constexpr int kRate = 16000;
+    static constexpr int kRingSize = 8192;  // 512 ms
+
+    // `data` at `rate`, already scaled by the playback volume.
+    void Push(const std::vector<int16_t>& data, int rate, int32_t volume_q16) {
+        if (data.empty()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int64_t now = Now();
+        if (end_ < now) {
+            // Silence since the last chunk: the ring must read zero there.
+            Fill(end_, now);
+            end_ = now;
+        }
+        const int64_t count = static_cast<int64_t>(data.size()) * kRate / rate;
+        for (int64_t i = 0; i < count; ++i) {
+            const double pos = static_cast<double>(i) * rate / kRate;
+            const size_t a = static_cast<size_t>(pos);
+            const size_t b = std::min(a + 1, data.size() - 1);
+            const double f = pos - a;
+            const double v = data[a] * (1.0 - f) + data[b] * f;
+            const int64_t scaled = static_cast<int64_t>(v * volume_q16 / 65536.0);
+            ring_[(end_ + i) & (kRingSize - 1)] =
+                static_cast<int16_t>(std::max<int64_t>(-32768, std::min<int64_t>(32767, scaled)));
+        }
+        end_ += count;
+    }
+
+    // The microphone has delivered `n` more samples: the timeline moves on. It is
+    // counted in microphone samples, not read off a clock: the microphone arrives
+    // in bursts, and a clock stamped at each read jitters by a whole frame.
+    void Advance(int64_t n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mic_pos_ += n;
+    }
+
+    // Fills `ref` (mono, 16 kHz) with the output that lies `delay_ms` behind now.
+    void Pull(int16_t* ref, size_t n, int delay_ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int64_t last = Now() - static_cast<int64_t>(delay_ms) * kRate / 1000;
+        const int64_t first = last - static_cast<int64_t>(n);
+        for (size_t i = 0; i < n; ++i) {
+            const int64_t p = first + static_cast<int64_t>(i);
+            ref[i] = (p >= end_ || p < end_ - kRingSize || p < 0) ? 0 : ring_[p & (kRingSize - 1)];
+        }
+    }
+
+    // True while the speaker is playing, or was within the last `tail_ms` (the
+    // sound is still on its way to the microphone).
+    bool Playing(int tail_ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return end_ + static_cast<int64_t>(tail_ms) * kRate / 1000 > Now();
+    }
+
+private:
+    int64_t Now() const { return mic_pos_; }
+    void Fill(int64_t from, int64_t to) {
+        if (to - from >= kRingSize) {
+            std::fill(std::begin(ring_), std::end(ring_), 0);
+            return;
+        }
+        for (int64_t p = from; p < to; ++p) {
+            ring_[p & (kRingSize - 1)] = 0;
+        }
+    }
+
+    std::mutex mutex_;
+    int16_t ring_[kRingSize] = {};
+    int64_t end_ = 0;
+    int64_t mic_pos_ = 0;
+};
+
+// OutputData is virtual and this board is what builds the codec, so the hooks
+// fit here without patching anything in audio_service.
 class LevelMeteringCodec : public NoAudioCodecSimplex {
 public:
-    using NoAudioCodecSimplex::NoAudioCodecSimplex;
+    template <typename... Args>
+    explicit LevelMeteringCodec(Args&&... args)
+        : NoAudioCodecSimplex(std::forward<Args>(args)...) {
+#if CONFIG_USE_DEVICE_AEC
+        // Two input channels, microphone and reference, as the AFE expects ("MR").
+        input_reference_ = true;
+        input_channels_ = 2;
+#endif
+    }
 
     virtual void OutputData(std::vector<int16_t>& data) override {
         if (!data.empty()) {
@@ -57,9 +166,125 @@ public:
             // mouth is already fully open.
             g_voice_level.store(std::min(100, mean * 100 / 6000),
                               std::memory_order_relaxed);
+#if CONFIG_USE_DEVICE_AEC
+            // The same gain NoAudioCodec::Write applies, so the reference is what the
+            // speaker really plays.
+            const int32_t volume_q16 =
+                static_cast<int32_t>(std::pow(output_volume_ / 100.0, 2) * 65536);
+            reference_.Push(data, output_sample_rate_, volume_q16);
+#endif
         }
         NoAudioCodecSimplex::OutputData(data);
     }
+
+#if CONFIG_USE_DEVICE_AEC
+    // The microphone is read 12 bits down from the 32-bit slot (the INMP441 is quiet),
+    // which is what the wake word needs at rest. While she talks her own voice, an
+    // inch from the microphone, then clips at 16 bits (rms 17000 to 21000 of 32767,
+    // measured) and the echo canceller has nothing left to subtract: so while she
+    // plays, and a little after, read further down and let the AFE's AGC raise it
+    // again once the echo is gone.
+    static constexpr int kRestShift = 12;
+    static constexpr int kPlayingShift = SOFIA_AEC_PLAYING_SHIFT;
+    virtual int Read(int16_t* dest, int samples) override {
+        const int shift = reference_.Playing(SOFIA_AEC_REF_DELAY_MS + 300) ? kPlayingShift : kRestShift;
+        size_t bytes_read = 0;
+        std::vector<int32_t> raw(samples);
+        if (i2s_channel_read(rx_handle_, raw.data(), samples * sizeof(int32_t), &bytes_read, 200) != ESP_OK) {
+            return 0;
+        }
+        samples = bytes_read / sizeof(int32_t);
+        for (int i = 0; i < samples; i++) {
+            int32_t v = raw[i] >> shift;
+            dest[i] = (v > INT16_MAX) ? INT16_MAX : (v < -INT16_MAX) ? -INT16_MAX : (int16_t)v;
+        }
+        return samples;
+    }
+
+    // The AFE wants the channels interleaved: microphone, reference, microphone, ...
+    virtual bool InputData(std::vector<int16_t>& data) override {
+        const size_t frames = data.size() / 2;
+        std::vector<int16_t> mic(frames);
+        if (!NoAudioCodecSimplex::InputData(mic)) {
+            return false;
+        }
+        reference_.Advance(frames);
+        std::vector<int16_t> ref(frames);
+        reference_.Pull(ref.data(), frames, SOFIA_AEC_REF_DELAY_MS);
+#ifdef SOFIA_AEC_SELFTEST
+        for (size_t i = 0; i < frames; ++i) ref[i] = mic[i];
+#endif
+        for (size_t i = 0; i < frames; ++i) {
+            data[2 * i] = mic[i];
+            data[2 * i + 1] = ref[i];
+        }
+#ifdef SOFIA_AEC_PROBE
+        ProbeDelay(mic, ref);
+#endif
+#ifdef SOFIA_AEC_LEVELS
+        {
+            static double ma = 0, ra = 0; static int mc = 0;
+            for (size_t i = 0; i < frames; ++i) { ma += double(mic[i]) * mic[i]; ra += double(ref[i]) * ref[i]; }
+            mc += frames;
+            if (mc >= 16000 * 2) {
+                ESP_LOGW(TAG, "MICIN rms %.0f ref rms %.0f", std::sqrt(ma / mc), std::sqrt(ra / mc));
+                ma = ra = 0; mc = 0;
+            }
+        }
+#endif
+        return true;
+    }
+
+private:
+    EchoReference reference_;
+#ifdef SOFIA_AEC_PROBE
+    // Which delay makes the reference line up with the microphone: correlation of
+    // the two over 0..320 ms in 8 ms steps, summed over about two seconds of speech.
+    static constexpr int kLags = 41;
+    double sxy_[kLags] = {}, sy_[kLags] = {}, syy_[kLags] = {};
+    double sx_ = 0, sxx_ = 0, n_ = 0;
+    int probe_frames_ = 0;
+    // Pearson correlation of the envelopes (|x|), so the phase of the sound does not matter.
+    void ProbeDelay(const std::vector<int16_t>& mic, const std::vector<int16_t>&) {
+        std::vector<int16_t> r(mic.size());
+        for (int l = 0; l < kLags; ++l) {
+            reference_.Pull(r.data(), r.size(), l * 8);
+            for (size_t i = 0; i < mic.size(); ++i) {
+                const double x = std::abs(static_cast<int>(mic[i]));
+                const double y = std::abs(static_cast<int>(r[i]));
+                sxy_[l] += x * y;
+                sy_[l] += y;
+                syy_[l] += y * y;
+                if (l == 0) {
+                    sx_ += x;
+                    sxx_ += x * x;
+                    n_ += 1;
+                }
+            }
+        }
+        if (++probe_frames_ >= 70) {
+            int best = 0;
+            double rho[kLags];
+            for (int l = 0; l < kLags; ++l) {
+                const double cov = sxy_[l] / n_ - (sx_ / n_) * (sy_[l] / n_);
+                const double vx = sxx_ / n_ - (sx_ / n_) * (sx_ / n_);
+                const double vy = syy_[l] / n_ - (sy_[l] / n_) * (sy_[l] / n_);
+                rho[l] = (vx > 1 && vy > 1) ? cov / std::sqrt(vx * vy) : 0;
+                if (rho[l] > rho[best]) best = l;
+            }
+            if (syy_[0] / n_ > 1e4) {
+                ESP_LOGW(TAG, "AECPROBE best lag %d ms rho %.2f (at 40 %.2f, 80 %.2f, 120 %.2f, 160 %.2f)",
+                         best * 8, rho[best], rho[5], rho[10], rho[15], rho[20]);
+            }
+            std::fill(std::begin(sxy_), std::end(sxy_), 0.0);
+            std::fill(std::begin(sy_), std::end(sy_), 0.0);
+            std::fill(std::begin(syy_), std::end(syy_), 0.0);
+            sx_ = sxx_ = n_ = 0;
+            probe_frames_ = 0;
+        }
+    }
+#endif
+#endif
 };
 
 // Sofia's face: eyes and mouth, DRAWN.
