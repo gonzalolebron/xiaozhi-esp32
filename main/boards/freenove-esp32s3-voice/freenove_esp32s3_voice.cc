@@ -1,5 +1,6 @@
 #include "wifi_board.h"
 #include "audio/codecs/no_audio_codec.h"
+#include "mic_highpass.h"
 #include "display/lcd_display.h"
 #include "display/lvgl_display/lvgl_theme.h"
 #include "assets/lang_config.h"
@@ -60,6 +61,19 @@ public:
         }
         NoAudioCodecSimplex::OutputData(data);
     }
+
+    // Everything the microphone hands over goes through the 80 Hz high-pass
+    // first: the wake word, the VAD and Whisper all hear it without the rumble.
+    virtual bool InputData(std::vector<int16_t>& data) override {
+        if (!NoAudioCodecSimplex::InputData(data)) {
+            return false;
+        }
+        highpass_.Process(data.data(), data.size());
+        return true;
+    }
+
+private:
+    MicHighPass highpass_;
 };
 
 // Sofia's face: eyes and mouth, DRAWN.
