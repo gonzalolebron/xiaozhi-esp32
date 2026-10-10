@@ -1,12 +1,4 @@
 #include "afe_audio_engine.h"
-// #define SOFIA_AEC_LEVELS  // logs the AFE output level, see freenove_esp32s3_voice.cc
-#ifdef SOFIA_AEC_LEVELS
-static int g_vad_frames = 0, g_wake_states = 0;
-#endif
-#ifndef SOFIA_AEC_FILTER
-#define SOFIA_AEC_FILTER 8
-#endif
-#include <cmath>
 
 #include <cassert>
 #include <cstring>
@@ -156,9 +148,8 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     }
 
     afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_FD_HIGH_PERF;
-    afe_config->aec_filter_length = SOFIA_AEC_FILTER;
-    afe_config->aec_nlp_level = AEC_NLP_LEVEL_NORMAL;
+    afe_config->aec_mode = AEC_MODE_FD_LOW_COST;
+    afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;
     afe_config->vad_mode = VAD_MODE_0;
@@ -458,21 +449,6 @@ void AfeAudioEngine::HandleWakeWordResult(const afe_fetch_result_t* result) {
         return;
     }
 
-#ifdef SOFIA_AEC_LEVELS
-    {
-        if (result->vad_state == VAD_SPEECH) g_vad_frames++;
-        if (result->wakeup_state != WAKENET_NO_DETECT) g_wake_states++;
-        static double acc = 0; static int cnt = 0;
-        const size_t ns = result->data_size / sizeof(int16_t);
-        for (size_t i = 0; i < ns; ++i) acc += double(result->data[i]) * result->data[i];
-        cnt += ns;
-        if (cnt >= 16000 * 2) {
-            ESP_LOGW(TAG, "AFEOUT rms %.0f vad_speech_frames %d wake_states %d", std::sqrt(acc / cnt), g_vad_frames, g_wake_states);
-            g_vad_frames = 0; g_wake_states = 0;
-            acc = 0; cnt = 0;
-        }
-    }
-#endif
 #if CONFIG_SEND_WAKE_WORD_DATA
     wake_word_audio_cache_.Store(result->data, result->data_size / sizeof(int16_t));
 #endif
