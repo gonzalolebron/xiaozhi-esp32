@@ -86,7 +86,8 @@ private:
 //
 // What is still computed here: which mouth frame is due — lip sync follows the
 // real audio level — plus blinking, the closed eyes outside a session, the gaze,
-// and the switch to the green variant while listening.
+// the switch to the green variant while listening, and the green ring along the
+// edge of the display that goes with it.
 //
 // Mind the order: anything touching LVGL objects goes AFTER the parent's
 // SetupUI(); from the constructor it writes through null pointers and the board
@@ -94,6 +95,7 @@ private:
 #include "eyes_png.h"
 #include "mouth_png.h"
 #include "face_scenes.h"
+#include "listening_ring.h"
 #include "sofia_netlog.h"
 
 class DrawnFace : public SpiLcdDisplay {
@@ -242,6 +244,9 @@ public:
             return listening_ ? face::Col{52, 205, 90} : face::Col{92, 163, 242};
         };
         scenes_.Init(face_, hooks);
+
+        // Above everything else: the microphone is open whatever the face shows.
+        ring_.Make(face_);
     }
 
     // What the server asks the face to show, besides the emotion of the mouth.
@@ -335,8 +340,9 @@ public:
         DisplayLockGuard lock(this);
         if (mouth_ == nullptr) return;
 
-        // Green while listening: the whole drawing switches to the green-iris variant,
-        // the sign that the microphone is open.
+        // Green while listening: the whole drawing switches to the green-iris variant
+        // and a green ring lights up along the edge, the sign that the microphone is
+        // open.
         //
         // Outside a session Sofia closes her eyes, and opens them when the
         // conversation starts. The rule is defined by what IS a session — connecting,
@@ -377,6 +383,7 @@ public:
         bool listening = (strcmp(status, Lang::Strings::LISTENING) == 0);
         if (listening != listening_) {
             listening_ = listening;
+            ring_.Show(listening_);
             ShowFrame(frame_);   // same frame, different colour
         }
 
@@ -428,6 +435,7 @@ private:
     lv_obj_t* dots_[3]{};
     lv_timer_t* scene_timer_ = nullptr;
     face::Scenes scenes_;
+    face::ListeningRing ring_;
     bool thinking_ = false;
     bool music_on_ = false;        // the server said music is playing (spec 021)
     bool in_blink_ = false;
