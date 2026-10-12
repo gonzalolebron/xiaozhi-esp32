@@ -1,16 +1,18 @@
-// SPIKE (spec 027): a WireGuard tunnel from the board to the Mac mini, so she
-// works on a network that is not the house's — a phone's hotspot — with nothing
-// else to carry.
+// The tunnel home (spec 027): a WireGuard tunnel from the board to the house, so
+// she works on a network that is not the house's — a phone's hotspot — with
+// nothing else to carry.
 //
 // At home the server answers directly and no tunnel is started: the house must
 // not depend on it. Away, the clock is set from the internet (the handshake
 // carries a timestamp the other end refuses if it goes backwards), the tunnel
 // comes up against the house's public name, and it becomes the default route:
-// from then on 192.168.0.105 exists again, and the firmware's own retries find
-// the server without knowing anything changed.
+// from then on the server exists again, and the firmware's own retries find it
+// without knowing anything changed.
 //
-// The keys come from sofia_wireguard_secrets.h, written on the build machine
-// from files outside every repository and ignored by git.
+// The tunnel is whatever WireGuard configuration file was uploaded in setup
+// mode (sofia_wg_conf.h reads it); it lives in NVS, like the WiFi passwords,
+// and never in the firmware or in a repository. Without one there is no
+// tunnel and nothing here does anything.
 #pragma once
 
 #include <atomic>
@@ -27,12 +29,59 @@
 #include <freertos/task.h>
 #include <lwip/sockets.h>
 #include "wifi_manager.h"
-#include "sofia_wireguard_secrets.h"
+#include "settings.h"
+#include "sdkconfig.h"
+#include "sofia_wg_conf.h"
 
 extern "C" uint32_t sofia_wg_nat_home;     // components/esp_wireguard/src/wireguardif.c
 extern "C" uint32_t sofia_wg_nat_peer;
 
 namespace sofia_wireguard {
+
+// ---- the stored configuration (NVS namespace sofia_wg) ----
+inline bool Load(sofia::WgConf& c) {
+    Settings s("sofia_wg");
+    c.private_key = s.GetString("private_key");
+    c.address = s.GetString("address");
+    c.peer_public_key = s.GetString("peer_key");
+    c.preshared_key = s.GetString("psk");
+    c.endpoint_host = s.GetString("host");
+    c.endpoint_port = s.GetInt("port", 51820);
+    c.peer_address = s.GetString("peer_addr");
+    c.keepalive = s.GetInt("keepalive", 25);
+    return !c.private_key.empty() && !c.peer_public_key.empty() && !c.endpoint_host.empty();
+}
+
+inline void Save(const sofia::WgConf& c) {
+    Settings s("sofia_wg", true);
+    s.SetString("private_key", c.private_key);
+    s.SetString("address", c.address);
+    s.SetString("peer_key", c.peer_public_key);
+    s.SetString("psk", c.preshared_key);
+    s.SetString("host", c.endpoint_host);
+    s.SetInt("port", c.endpoint_port);
+    s.SetString("peer_addr", c.peer_address);
+    s.SetInt("keepalive", c.keepalive);
+}
+
+inline void Erase() {
+    Settings s("sofia_wg", true);
+    s.EraseAll();
+}
+
+// Where the server is at home: the host and port of the OTA address, the one
+// thing the board always knows about it.
+inline void HomeServer(std::string& host, int& port) {
+    Settings wifi("wifi");
+    std::string url = wifi.GetString("ota_url");
+    if (url.empty()) url = CONFIG_OTA_URL;
+    const size_t scheme = url.find("://");
+    std::string rest = scheme == std::string::npos ? url : url.substr(scheme + 3);
+    rest = rest.substr(0, rest.find('/'));
+    const size_t colon = rest.find(':');
+    host = rest.substr(0, colon);
+    port = colon == std::string::npos ? 80 : atoi(rest.c_str() + colon + 1);
+}
 
 // True once the tunnel carries her traffic: she is not at home.
 inline std::atomic<bool> g_away{false};
@@ -81,18 +130,25 @@ inline void Report(const char* what) {
 }
 
 inline void Task(void*) {
-    static char private_key[] = SOFIA_WG_PRIVATE_KEY;
-    static char peer_key[] = SOFIA_WG_PEER_PUBLIC_KEY;
-    static char address[] = SOFIA_WG_ADDRESS;
+    // They outlive this function: the tunnel keeps pointers into them.
+    static sofia::WgConf conf;
+    static std::string home_host;
+    static int home_port = 80;
     static char mask[] = "255.255.255.0";
-    static char endpoint[] = SOFIA_WG_ENDPOINT;
     static wireguard_config_t config = ESP_WIREGUARD_CONFIG_DEFAULT();
     static wireguard_ctx_t ctx = {};
+
+    if (!Load(conf)) {
+        ESP_LOGI(WG_TAG, "no tunnel configured: load a WireGuard file in setup mode to have one");
+        vTaskDelete(nullptr);
+        return;
+    }
+    HomeServer(home_host, home_port);
 
     while (!WifiManager::GetInstance().IsInitialized() || !WifiManager::GetInstance().IsConnected()) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    const int direct = ProbeMs(SOFIA_WG_HOME_SERVER, 8003, 3);
+    const int direct = ProbeMs(home_host.c_str(), home_port, 3);
     if (direct >= 0) {
         ESP_LOGI(WG_TAG, "at home: the server answers directly (%d ms), no tunnel", direct);
         vTaskDelete(nullptr);
@@ -110,13 +166,14 @@ inline void Task(void*) {
     }
 
     Report("before the tunnel");
-    config.private_key = private_key;
-    config.public_key = peer_key;
-    config.allowed_ip = address;
+    config.private_key = conf.private_key.data();
+    config.public_key = conf.peer_public_key.data();
+    config.preshared_key = conf.preshared_key.empty() ? nullptr : conf.preshared_key.data();
+    config.allowed_ip = conf.address.data();
     config.allowed_ip_mask = mask;
-    config.endpoint = endpoint;
-    config.port = SOFIA_WG_PORT;
-    config.persistent_keepalive = 25;
+    config.endpoint = conf.endpoint_host.data();
+    config.port = conf.endpoint_port;
+    config.persistent_keepalive = conf.keepalive;
     esp_err_t err = esp_wireguard_init(&config, &ctx);
     if (err == ESP_OK) err = esp_wireguard_connect(&ctx);
     if (err != ESP_OK) {
@@ -133,8 +190,8 @@ inline void Task(void*) {
         if (now_up && !up) {
             // Inside the tunnel the server answers at its tunnel address, not at
             // the house one the firmware knows it by: see sofia_nat().
-            sofia_wg_nat_peer = inet_addr(SOFIA_WG_PEER_ADDRESS);
-            sofia_wg_nat_home = inet_addr(SOFIA_WG_HOME_SERVER);
+            sofia_wg_nat_peer = inet_addr(conf.peer_address.c_str());
+            sofia_wg_nat_home = inet_addr(home_host.c_str());
             esp_wireguard_set_default(&ctx);
             // Away, the radio never dozes. A phone's hotspot drops a client that goes
             // quiet, and then switches itself off for lack of clients; and with the
@@ -148,7 +205,7 @@ inline void Task(void*) {
         }
         if (now_up != up) { up = now_up; Report(up ? "tunnel up" : "tunnel DOWN"); }
         if (up && tick % 3 == 0) {
-            const int ms = ProbeMs(SOFIA_WG_HOME_SERVER, 8003);
+            const int ms = ProbeMs(home_host.c_str(), home_port);
             ESP_LOGI(WG_TAG, "the server through the tunnel: %d ms (internal heap free %u, minimum %u)", ms,
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                      static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));

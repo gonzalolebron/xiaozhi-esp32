@@ -13,6 +13,8 @@
 #include <cmath>
 #include <esp_timer.h>
 #include <esp_wifi.h>
+#include <esp_http_server.h>
+#include <cJSON.h>
 #include "wifi_manager.h"
 #include "ssid_manager.h"
 #include "application.h"
@@ -20,6 +22,7 @@
 #include "config.h"
 #include "led/gpio_led.h"
 #include "mcp_server.h"
+#include "settings.h"
 
 #include <esp_log.h>
 #include <driver/gpio.h>
@@ -740,6 +743,7 @@ private:
     int64_t setup_since_ = 0;          // ms since boot when setup mode was last left alone
     int64_t setup_probe_since_ = 0;    // trying the known networks since then; 0 when not
     volatile bool setup_leave_now_ = false;
+    httpd_handle_t setup_page_ = nullptr;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -881,10 +885,148 @@ private:
         }
     }
 
+    // A second page for setup mode, on port 8080: the tunnel home (spec 027).
+    // An ordinary WireGuard configuration file is uploaded here and kept in
+    // NVS; the board restarts and, away from home, comes up through it. The
+    // page says whether there is a tunnel and where it goes, never its keys.
+    // Upstream's page (port 80) belongs to a managed component and cannot grow
+    // a section of ours. It only exists while the board is in setup mode.
+    static constexpr const char* SETUP_PAGE =
+        "<!doctype html><html lang=es><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Sof\u00eda: t\u00fanel</title>"
+        "<style>body{font:17px system-ui,sans-serif;margin:24px;max-width:30em}"
+        "input,button{font:inherit;width:100%;box-sizing:border-box;padding:10px;margin:6px 0 14px}"
+        "button{background:#1c6;color:#fff;border:0;border-radius:6px}"
+        "button.no{background:#c33}#st{padding:10px;background:#eee;border-radius:6px}</style>"
+        "<h2>T\u00fanel a casa (WireGuard)</h2>"
+        "<p>Para que Sof\u00eda funcione fuera de casa, por ejemplo con el punto de acceso de "
+        "un tel\u00e9fono. Sub\u00ed el fichero <b>.conf</b> que se gener\u00f3 para esta placa.</p>"
+        "<p id=st>Mirando\u2026</p>"
+        "<input type=file id=f accept='.conf,text/plain'>"
+        "<button onclick='up()'>Subir y reiniciar</button>"
+        "<button class=no onclick='del()'>Borrar el t\u00fanel</button>"
+        "<p id=m></p>"
+        "<script>"
+        "const st=document.getElementById('st'),m=document.getElementById('m');"
+        "function show(){fetch('/wireguard/status').then(r=>r.json()).then(j=>{"
+        "st.textContent=j.configured?'Hay un t\u00fanel cargado: sale hacia '+j.endpoint+' y la placa es '+j.address+'.'"
+        ":'No hay ning\u00fan t\u00fanel cargado.'}).catch(()=>{st.textContent='No pude leer el estado.'})}"
+        "function up(){const f=document.getElementById('f').files[0];"
+        "if(!f){m.textContent='Eleg\u00ed primero el fichero.';return}"
+        "f.text().then(t=>fetch('/wireguard',{method:'POST',body:t})).then(r=>r.json())"
+        ".then(j=>{m.textContent=j.ok?'Guardado. Me reinicio en unos segundos.':j.error;show()})"
+        ".catch(()=>{m.textContent='No pude subirlo.'})}"
+        "function del(){fetch('/wireguard/delete',{method:'POST'}).then(()=>{m.textContent='T\u00fanel borrado.';show()})}"
+        "show()"
+        "</script></html>";
+
+    static esp_err_t ReplyJson(httpd_req_t* req, cJSON* json) {
+        char* text = cJSON_PrintUnformatted(json);
+        cJSON_Delete(json);
+        httpd_resp_set_type(req, "application/json");
+        const esp_err_t err = httpd_resp_sendstr(req, text != nullptr ? text : "{}");
+        cJSON_free(text);
+        return err;
+    }
+
+    void StartSetupPage() {
+        if (setup_page_ != nullptr) return;
+        httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+        config.server_port = 8080;
+        config.ctrl_port = 32769;             // upstream's page holds the default one
+        config.max_uri_handlers = 4;
+        config.stack_size = 8192;             // the file is parsed on this stack
+        config.lru_purge_enable = true;
+        if (httpd_start(&setup_page_, &config) != ESP_OK) { setup_page_ = nullptr; return; }
+
+        httpd_uri_t page = {};
+        page.uri = "/";
+        page.method = HTTP_GET;
+        page.handler = [](httpd_req_t* req) -> esp_err_t {
+            httpd_resp_set_type(req, "text/html; charset=utf-8");
+            return httpd_resp_send(req, SETUP_PAGE, HTTPD_RESP_USE_STRLEN);
+        };
+        httpd_register_uri_handler(setup_page_, &page);
+
+        httpd_uri_t status = {};
+        status.uri = "/wireguard/status";
+        status.method = HTTP_GET;
+        status.handler = [](httpd_req_t* req) -> esp_err_t {
+            sofia::WgConf conf;
+            const bool configured = sofia_wireguard::Load(conf);
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json, "configured", configured);
+            if (configured) {
+                const std::string endpoint = conf.endpoint_host + ":" + std::to_string(conf.endpoint_port);
+                cJSON_AddStringToObject(json, "endpoint", endpoint.c_str());
+                cJSON_AddStringToObject(json, "address", conf.address.c_str());
+            }
+            return ReplyJson(req, json);
+        };
+        httpd_register_uri_handler(setup_page_, &status);
+
+        httpd_uri_t upload = {};
+        upload.uri = "/wireguard";
+        upload.method = HTTP_POST;
+        upload.handler = [](httpd_req_t* req) -> esp_err_t {
+            cJSON* json = cJSON_CreateObject();
+            std::string error;
+            sofia::WgConf conf;
+            if (req->content_len == 0 || req->content_len > 4096) {
+                error = "El fichero est\u00e1 vac\u00edo o es demasiado grande para ser de WireGuard.";
+            } else {
+                std::string body(req->content_len, '\0');
+                size_t got = 0;
+                while (got < body.size()) {
+                    const int n = httpd_req_recv(req, body.data() + got, body.size() - got);
+                    if (n <= 0) { cJSON_Delete(json); return ESP_FAIL; }
+                    got += n;
+                }
+                if (sofia::ParseWgConf(body, conf, error)) {
+                    // Never a key in the log: it also travels to the server (spec 018).
+                    ESP_LOGI(TAG, "setup mode: a tunnel was loaded, to %s:%d as %s; restarting",
+                             conf.endpoint_host.c_str(), conf.endpoint_port, conf.address.c_str());
+                    sofia_wireguard::Save(conf);
+                    // Restart to come up with it. From its own task: this one still
+                    // has the reply to send.
+                    xTaskCreate([](void*) {
+                        vTaskDelay(pdMS_TO_TICKS(3000));
+                        esp_restart();
+                    }, "wg_restart", 2048, nullptr, 2, nullptr);
+                }
+            }
+            cJSON_AddBoolToObject(json, "ok", error.empty());
+            if (!error.empty()) cJSON_AddStringToObject(json, "error", error.c_str());
+            return ReplyJson(req, json);
+        };
+        httpd_register_uri_handler(setup_page_, &upload);
+
+        httpd_uri_t erase = {};
+        erase.uri = "/wireguard/delete";
+        erase.method = HTTP_POST;
+        erase.handler = [](httpd_req_t* req) -> esp_err_t {
+            ESP_LOGI(TAG, "setup mode: the tunnel was deleted");
+            sofia_wireguard::Erase();
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json, "ok", true);
+            return ReplyJson(req, json);
+        };
+        httpd_register_uri_handler(setup_page_, &erase);
+        ESP_LOGI(TAG, "setup mode: the tunnel page is on port 8080");
+    }
+
+    void StopSetupPage() {
+        if (setup_page_ == nullptr) return;
+        httpd_stop(setup_page_);
+        setup_page_ = nullptr;
+    }
+
     void WatchSetup() {
         auto& wifi = WifiManager::GetInstance();
         if (!wifi.IsInitialized()) return;
         const int64_t now = esp_timer_get_time() / 1000;
+        if (wifi.IsConfigMode()) StartSetupPage(); else StopSetupPage();
         if (wifi.IsConfigMode()) {
             setup_probe_since_ = 0;
             wifi_sta_list_t guests = {};
@@ -933,9 +1075,45 @@ private:
                 setup_leave_now_ = true;
                 return;
             }
-            ESP_LOGI(TAG, "button held: setup mode");
-            EnterWifiConfigMode();
+            // Upstream only enters from a few states. The one left out is the
+            // one that matters away from home: connected to a WiFi from which the
+            // server cannot be reached, retrying for minutes ("activating"). From
+            // there it restarts straight into setup mode instead (found on
+            // 2026-10-12, with the board on a phone's hotspot and no tunnel yet).
+            const auto state = Application::GetInstance().GetDeviceState();
+            if (state == kDeviceStateIdle || state == kDeviceStateListening ||
+                state == kDeviceStateSpeaking || state == kDeviceStateStarting) {
+                ESP_LOGI(TAG, "button held: setup mode");
+                EnterWifiConfigMode();
+                return;
+            }
+            ESP_LOGI(TAG, "button held with no server (state %d): restarting into setup mode", state);
+            {
+                Settings once("sofia", true);
+                once.SetBool("setup_once", true);
+            }
+            esp_restart();
         });
+    }
+
+    // The other half of the restart above: asked for before the reboot, setup
+    // mode is entered as soon as the network layer exists and before the WiFi
+    // has had time to connect, which is when upstream accepts it.
+    void EnterSetupIfAsked() {
+        {
+            Settings once("sofia", true);
+            if (!once.GetBool("setup_once", false)) return;
+            once.SetBool("setup_once", false);
+        }
+        xTaskCreate([](void* arg) {
+            auto* self = static_cast<FreenoveEsp32S3Voice*>(arg);
+            for (int i = 0; i < 500 && !WifiManager::GetInstance().IsInitialized(); ++i) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            ESP_LOGI(TAG, "setup mode was asked for before the restart");
+            self->EnterWifiConfigMode();
+            vTaskDelete(NULL);
+        }, "setup_once", 4096, this, 5, NULL);
     }
 
 public:
@@ -946,7 +1124,8 @@ public:
         InitializeTools();
         InitializeButtons();
         StartSetupWatch();
-        sofia_wireguard::Start();   // SPIKE (spec 027)
+        EnterSetupIfAsked();
+        sofia_wireguard::Start();   // the tunnel home, when one was loaded (spec 027)
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
