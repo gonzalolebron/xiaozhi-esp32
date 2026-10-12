@@ -13,6 +13,7 @@
 // from files outside every repository and ignored by git.
 #pragma once
 
+#include <atomic>
 #include <cstring>
 #include <ctime>
 #include <sys/time.h>
@@ -32,6 +33,10 @@ extern "C" uint32_t sofia_wg_nat_home;     // components/esp_wireguard/src/wireg
 extern "C" uint32_t sofia_wg_nat_peer;
 
 namespace sofia_wireguard {
+
+// True once the tunnel carries her traffic: she is not at home.
+inline std::atomic<bool> g_away{false};
+inline bool Away() { return g_away.load(std::memory_order_relaxed); }
 
 static const char* const WG_TAG = "SofiaWireguard";
 
@@ -131,6 +136,13 @@ inline void Task(void*) {
             sofia_wg_nat_peer = inet_addr(SOFIA_WG_PEER_ADDRESS);
             sofia_wg_nat_home = inet_addr(SOFIA_WG_HOME_SERVER);
             esp_wireguard_set_default(&ctx);
+            // Away, the radio never dozes. A phone's hotspot drops a client that goes
+            // quiet, and then switches itself off for lack of clients; and with the
+            // radio asleep a connection through the tunnel took 1.2-1.8 s against
+            // 90 ms awake (measured on 2026-10-12). The tunnel's own keepalive, every
+            // 25 s, and the log line every 10 s keep traffic flowing besides.
+            g_away.store(true);
+            WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::PERFORMANCE);
             ESP_LOGI(WG_TAG, "tunnel UP after %d ms: everything goes home through it now",
                      static_cast<int>((esp_timer_get_time() - started) / 1000));
         }

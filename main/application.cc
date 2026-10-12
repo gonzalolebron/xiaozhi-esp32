@@ -13,6 +13,10 @@
 #include "websocket_protocol.h"
 
 #include <driver/gpio.h>
+
+// Sofia: a board may say that its link to the server is slow and jittery (she
+// is away from home, behind a phone and a tunnel). Weak: no other board has it.
+extern "C" bool sofia_link_is_slow(void) __attribute__((weak));
 #include <esp_log.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
@@ -554,6 +558,12 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        } else if (sofia_link_is_slow != nullptr && sofia_link_is_slow()) {
+            // Ahead of "start": keep a second of it for when "start" arrives.
+            std::lock_guard<std::mutex> lock(early_audio_mutex_);
+            if (early_audio_.size() >= 20) early_audio_.pop_front();
+            early_audio_.push_back(std::move(packet));
+            early_audio_at_ = esp_timer_get_time() / 1000;
         }
     });
 
@@ -622,20 +632,40 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
+                if (tts_stop_timer_ != nullptr) esp_timer_stop(tts_stop_timer_);   // a new sentence: no stop pending
                 Schedule([this]() {
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
-                });
-            } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                    // Whatever arrived just ahead of "start" belongs to this sentence.
+                    std::deque<std::unique_ptr<AudioStreamPacket>> early;
+                    int64_t at = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(early_audio_mutex_);
+                        early.swap(early_audio_);
+                        at = early_audio_at_;
+                    }
+                    if (!early.empty() && esp_timer_get_time() / 1000 - at < 600 &&
+                        GetDeviceState() == kDeviceStateSpeaking) {
+                        ESP_LOGI(TAG, "%d audio frames had arrived before \"start\": played", static_cast<int>(early.size()));
+                        for (auto& packet : early) audio_service_.PushPacketToDecodeQueue(std::move(packet));
                     }
                 });
+            } else if (strcmp(state->valuestring, "stop") == 0) {
+                if (sofia_link_is_slow != nullptr && sofia_link_is_slow()) {
+                    // The tail of the audio is still on its way: stay speaking a
+                    // little longer so it is taken, then stop as usual.
+                    if (tts_stop_timer_ == nullptr) {
+                        esp_timer_create_args_t args = {};
+                        args.callback = [](void* arg) { static_cast<Application*>(arg)->HandleTtsStop(); };
+                        args.arg = this;
+                        args.name = "tts_stop";
+                        esp_timer_create(&args, &tts_stop_timer_);
+                    }
+                    esp_timer_stop(tts_stop_timer_);
+                    esp_timer_start_once(tts_stop_timer_, 400 * 1000);
+                } else {
+                    HandleTtsStop();
+                }
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
@@ -1358,6 +1388,18 @@ void Application::SetAecMode(AecMode mode) {
 }
 
 void Application::PlaySound(const std::string_view& sound) { audio_service_.PlaySound(sound); }
+
+void Application::HandleTtsStop() {
+    Schedule([this]() {
+        if (GetDeviceState() == kDeviceStateSpeaking) {
+            if (listening_mode_ == kListeningModeManualStop) {
+                SetDeviceState(kDeviceStateIdle);
+            } else {
+                SetDeviceState(kDeviceStateListening);
+            }
+        }
+    });
+}
 
 void Application::ResetProtocol() {
     Schedule([this]() {

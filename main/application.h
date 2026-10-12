@@ -148,6 +148,17 @@ private:
 
     bool has_server_time_ = false;
     bool aborted_ = false;
+
+    // Sofia: audio that reaches the board out of step with the "tts" messages.
+    // The audio travels by UDP and "start"/"stop" by MQTT; on a slow link (a
+    // phone's hotspot and a tunnel home) the first frames arrive before
+    // "start" and the last ones after "stop", and both were thrown away: the
+    // first and the last word of every sentence came out broken (2026-10-12).
+    std::mutex early_audio_mutex_;
+    std::deque<std::unique_ptr<AudioStreamPacket>> early_audio_;
+    int64_t early_audio_at_ = 0;                 // ms, when the newest of them arrived
+    esp_timer_handle_t tts_stop_timer_ = nullptr;
+    void HandleTtsStop();
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)

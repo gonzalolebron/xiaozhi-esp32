@@ -952,6 +952,12 @@ public:
         }
     }
 
+    // The application lowers the radio to LOW_POWER whenever she is idle. Away
+    // from home that is what makes a phone's hotspot let go of her.
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        WifiBoard::SetPowerSaveLevel(sofia_wireguard::Away() ? PowerSaveLevel::PERFORMANCE : level);
+    }
+
     virtual Led* GetLed() override {
         // Active high, same as the previous ESPHome configuration.
         static GpioLed led(BUILTIN_LED_GPIO, 1);
@@ -985,5 +991,8 @@ public:
         return &audio_codec;
     }
 };
+
+// What application.cc asks before forgiving audio that arrives out of step.
+extern "C" bool sofia_link_is_slow(void) { return sofia_wireguard::Away(); }
 
 DECLARE_BOARD(FreenoveEsp32S3Voice);
