@@ -54,7 +54,9 @@ void WifiBoard::StartNetwork() {
 
     // Initialize WiFi manager
     WifiManagerConfig config;
-    config.ssid_prefix = "Xiaozhi";
+    // Sofia: her own name on the setup access point and in the router's list,
+    // so «conectate a mi wifi» can be followed without knowing upstream's.
+    config.ssid_prefix = "Sofia";
     config.language = Lang::CODE;
     config.show_ota_config = true;
     config.show_sleep_config = true;

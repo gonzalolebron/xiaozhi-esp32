@@ -1,5 +1,5 @@
-// Sofia's scenes: the face that turns into a clock, a sun, a cloud, the rain, or
-// music.
+// Sofia's scenes: the face that turns into a clock, a sun, a cloud, the rain,
+// music, or a gear.
 //
 // She closes her eyes; the drawn lids hand over to geometric ones, which inflate
 // into the pieces of the scene; what the scene needs and the face has not got
@@ -24,6 +24,11 @@
 // session, until the server says it stopped. The lids become the two heads of a
 // pair of quavers, the mouth the beam; the stems grow between them, the pair
 // rocks on the beat and small notes rise out of the beam.
+//
+// The gear is the other scene that stays: it is what she shows while she waits
+// for a WiFi (setup mode), when she neither hears nor answers. The left lid
+// grows into the wheel, the teeth come out from behind it, a hole opens in the
+// middle, and it turns slowly until the board is connected again.
 #pragma once
 
 #include <algorithm>
@@ -62,7 +67,7 @@ inline float LerpAng(float a, float b, float t) {
     return a + d * t;
 }
 
-enum Scene { FACE_SCENE = 0, CLOCK_SCENE, SUN_SCENE, CLOUD_SCENE, RAIN_SCENE, MUSIC_SCENE };
+enum Scene { FACE_SCENE = 0, CLOCK_SCENE, SUN_SCENE, CLOUD_SCENE, RAIN_SCENE, MUSIC_SCENE, GEAR_SCENE };
 
 // ---------------------------------------------------------------- the pieces
 struct Ell { float x, y, rx, ry; Col c; };                 // the lids, the sun, a puff
@@ -70,7 +75,7 @@ struct Rr  { float x, y, rx, ry, len, ang; Col c; };       // the right lid; may
 struct Cap { float x, y, len, ang, w; Col c; };            // the mouth's line: a hand, an underline, a base
 struct Cir { float x, y, r; Col c; };                      // lives in the mouth until the cloud needs it
 struct Pose { Ell L; Rr R; Cap M; Cir P; };
-struct Fx { float rays = 0, ticks = 0, sec = 0, rain = 0, music = 0; };
+struct Fx { float rays = 0, ticks = 0, sec = 0, rain = 0, music = 0, gear = 0; };
 
 struct Target {
     Pose pose;
@@ -136,6 +141,13 @@ inline Target TargetFor(const SceneArgs& a, float seconds_into_day) {
         t.pose.M = {103, 84, 71.02f, -0.16991f, 5, WHITE};      // (103,84) to (173,72)
         t.pose.P = {120, 120, 0, WHITE};
         t.fx.music = 1;
+    } else if (a.scene == GEAR_SCENE) {
+        // The left lid is the wheel; the rest of the face waits behind it.
+        t.pose.L = {120, 120, 46, 46, WHITE};
+        t.pose.R = {120, 120, 14, 14, 0, 0, WHITE};
+        t.pose.M = {120, 120, 0, 0, 2, WHITE};
+        t.pose.P = {120, 120, 10, WHITE};
+        t.fx.gear = 1;
     }
     return t;
 }
@@ -201,10 +213,10 @@ struct Line {
     int l[4] = {-9999, -9999, -9999, -9999}, lwid = -1;
     uint32_t lcol = 0xFFFFFFFF;
     bool poly = false;                 // the last thing drawn was a polyline
-    void Make(lv_obj_t* parent) {
+    void Make(lv_obj_t* parent, bool rounded = true) {
         o = lv_line_create(parent);
         lv_obj_remove_style_all(o);
-        lv_obj_set_style_line_rounded(o, true, 0);
+        lv_obj_set_style_line_rounded(o, rounded, 0);
         Show(o, false);
     }
     void Hide() { Show(o, false); }
@@ -294,6 +306,7 @@ public:
         for (auto& c : cells_) c.Make(text_clip_);
         for (auto& r : rays_) r.Make(parent);
         for (auto& t : ticks_) t.Make(parent);
+        for (auto& t : teeth_) t.Make(parent, false);     // flat ends: a tooth, not a petal
         sec_.Make(parent); sec_tail_.Make(parent);
         brow_[0].Make(parent); brow_[1].Make(parent);
         P_.Make(parent);
@@ -301,6 +314,7 @@ public:
         R_.Make(parent);
         M_.Make(parent);
         L_.Make(parent);
+        hole_.Make(parent);                               // above the wheel
         HideAll();
     }
 
@@ -399,15 +413,16 @@ public:
         // The extras: the old scene's go back first, the new one's come out last;
         // one that both share (cloud to rain) just changes in place.
         Fx fx;
-        float fnow[5], ffrom[5] = {from_.fx.rays, from_.fx.ticks, from_.fx.sec, from_.fx.rain, from_.fx.music};
-        float ftgt[5] = {to.fx.rays, to.fx.ticks, to.fx.sec, to.fx.rain, to.fx.music};
-        for (int i = 0; i < 5; ++i) {
+        float fnow[6], ffrom[6] = {from_.fx.rays, from_.fx.ticks, from_.fx.sec, from_.fx.rain, from_.fx.music,
+                                   from_.fx.gear};
+        float ftgt[6] = {to.fx.rays, to.fx.ticks, to.fx.sec, to.fx.rain, to.fx.music, to.fx.gear};
+        for (int i = 0; i < 6; ++i) {
             const float out = ffrom[i] * (1 - extras_out), in = ftgt[i] * extras_in;
             fnow[i] = (phase_ == STEADY) ? ftgt[i]
                       : (ffrom[i] > 0 && ftgt[i] > 0) ? Lerp(ffrom[i], ftgt[i], pieces)
                                                       : std::max(out, in);
         }
-        fx.rays = fnow[0]; fx.ticks = fnow[1]; fx.sec = fnow[2]; fx.rain = fnow[3]; fx.music = fnow[4];
+        fx.rays = fnow[0]; fx.ticks = fnow[1]; fx.sec = fnow[2]; fx.rain = fnow[3]; fx.music = fnow[4]; fx.gear = fnow[5];
 
         // Phase changes.
         if (p >= 1.0f && phase_ != STEADY) {
@@ -434,7 +449,8 @@ public:
         // Back to the face by itself: a few seconds after she finished speaking
         // (or after the scene opened if she never said a word), never more than 40 s.
         // Not music: it stays while it plays, and the server says when it stopped.
-        if (phase_ == STEADY && scene_ != MUSIC_SCENE) {
+        // Nor the gear: it stays until the board is connected again.
+        if (phase_ == STEADY && scene_ != MUSIC_SCENE && scene_ != GEAR_SCENE) {
             const int64_t quiet_since = std::max(steady_t_, spoke_until_);
             if ((!speaking_ && now - quiet_since > 5500) || now - steady_t_ > 40000) Return(now);
         }
@@ -475,8 +491,8 @@ private:
     Line stem_[2];
     int64_t next_note_ = 0;
     int note_k_ = 0;
-    Line rays_[10], ticks_[12], sec_, sec_tail_, brow_[2], Rhand_, M_;
-    Disc P_, R_, L_;
+    Line rays_[10], ticks_[12], teeth_[8], sec_, sec_tail_, brow_[2], Rhand_, M_;
+    Disc P_, R_, L_, hole_;
     lv_obj_t* text_clip_ = nullptr;
     Cell cells_[6];
     TextState text_;
@@ -490,9 +506,11 @@ private:
         stem_[0].Hide(); stem_[1].Hide();
         for (auto& r : rays_) r.Hide();
         for (auto& t : ticks_) t.Hide();
+        for (auto& t : teeth_) t.Hide();
         sec_.Hide(); sec_tail_.Hide(); Rhand_.Hide(); M_.Hide();
         brow_[0].Hide(); brow_[1].Hide();
         P_.Set(0, 0, 0, 0, WHITE); R_.Set(0, 0, 0, 0, WHITE); L_.Set(0, 0, 0, 0, WHITE);
+        hole_.Set(0, 0, 0, 0, WHITE);
         for (auto& c : cells_) c.Hide();
         Show(text_clip_, false);
         text_ = TextState{};
@@ -586,8 +604,10 @@ private:
             stem_[0].Hide(); stem_[1].Hide();
             for (auto& r : rays_) r.Hide();
             for (auto& t : ticks_) t.Hide();
+            for (auto& t : teeth_) t.Hide();
             sec_.Hide(); sec_tail_.Hide(); Rhand_.Hide(); M_.Hide();
             P_.Set(0, 0, 0, 0, WHITE); R_.Set(0, 0, 0, 0, WHITE); L_.Set(0, 0, 0, 0, WHITE);
+            hole_.Set(0, 0, 0, 0, WHITE);
             brow_[0].Hide(); brow_[1].Hide();
             return;
         }
@@ -615,12 +635,26 @@ private:
             L_.Set(L.x, L.y + bob, L.rx * sl, L.ry * sl, L.c);
             for (auto& r : rays_) r.Hide();
             for (auto& t : ticks_) t.Hide();
+            for (auto& t : teeth_) t.Hide();
+            hole_.Set(0, 0, 0, 0, WHITE);
             sec_.Hide(); sec_tail_.Hide();
             if (brow > 0.001f) { Brow(0, brow); Brow(1, brow); }
             else { brow_[0].Hide(); brow_[1].Hide(); }
             return;
         }
         stem_[0].Hide(); stem_[1].Hide();
+
+        // The gear: eight flat teeth come out from behind the wheel and turn with
+        // it, one turn every twelve seconds; the hole is drawn last, on top.
+        if (fx.gear > 0.001f) {
+            const float rot = static_cast<float>(now % 12000) / 12000.0f * 6.2831853f;
+            const float r0 = 38, r1 = Lerp(r0, 64, fx.gear);
+            for (int i = 0; i < 8; ++i) {
+                const float a = rot + i / 8.0f * 6.2831853f;
+                teeth_[i].Seg(L.x + std::cos(a) * r0, L.y + std::sin(a) * r0,
+                              L.x + std::cos(a) * r1, L.y + std::sin(a) * r1, 20, WHITE);
+            }
+        } else for (auto& t : teeth_) t.Hide();
 
         if (fx.rays > 0.001f) {
             const float rot = static_cast<float>(now) / 4000.0f, ext = fx.rays * (18 + beat * 10);
@@ -662,6 +696,7 @@ private:
         M_.Seg(M.x, M.y, M.x + std::cos(M.ang) * M.len, M.y + std::sin(M.ang) * M.len, 2 * M.w, M.c);
         const float hub = (scene_ == CLOCK_SCENE) ? beat * 4 : 0;
         L_.Set(L.x, L.y, L.rx * swell + hub, L.ry * swell + hub, L.c);
+        hole_.Set(L.x, L.y, 18 * fx.gear, 18 * fx.gear, Col{0, 0, 0});
         (void)extras_out;
     }
 

@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <cmath>
 #include <esp_timer.h>
+#include <esp_wifi.h>
+#include "wifi_manager.h"
+#include "ssid_manager.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
@@ -300,6 +303,26 @@ public:
         }
     }
 
+    // Setup mode: she waits for a WiFi and neither hears nor answers, so the
+    // face becomes a gear and stays one until the board is connected again. It
+    // hangs on the status text and not on an order from the server, because in
+    // setup mode there is no server: the button and a boot without a known
+    // network both end up in the same alert.
+    void SetSetup(bool on, int64_t now) {
+        if (on == setup_on_) return;
+        setup_on_ = on;
+        ESP_LOGI(TAG, "setup mode %s: %s", on ? "on" : "off", on ? "gear" : "back to the face");
+        if (!on) {
+            if (scenes_.Active() && scenes_.scene() == face::GEAR_SCENE) { scenes_.Return(now); gear_back_ = true; }
+            return;
+        }
+        if (thinking_) { thinking_ = false; ShowCloud(false); if (frame_ >= UP) ShowFrame(OPEN); }
+        face::SceneArgs a;
+        a.scene = face::GEAR_SCENE;
+        scenes_.Start(a, now, asleep_);
+        lv_timer_resume(scene_timer_);
+    }
+
     // The music scene, from wherever the face is: shut eyes out of a session.
     void StartMusic(int64_t now) {
         if (scenes_.Active() && scenes_.scene() == face::MUSIC_SCENE &&
@@ -370,9 +393,12 @@ public:
             think_end_ = NowMs();
         }
         scenes_.NoteSpeaking(speaking_now, NowMs());
+        if (!scenes_.Active()) gear_back_ = false;
+        SetSetup(strcmp(status, Lang::Strings::WIFI_CONFIG_MODE) == 0, NowMs());
         const bool music_shown = scenes_.Active() && scenes_.scene() == face::MUSIC_SCENE;
-        if (asleep_ && scenes_.Active() && !(music_on_ && music_shown)) scenes_.Abort();   // the conversation closed
-        if (asleep_ && music_on_ && !scenes_.Active()) StartMusic(NowMs());   // back to the music
+        const bool gear_shown = scenes_.Active() && scenes_.scene() == face::GEAR_SCENE;
+        if (asleep_ && scenes_.Active() && !(music_on_ && music_shown) && !gear_shown && !gear_back_) scenes_.Abort();   // the conversation closed
+        if (asleep_ && music_on_ && !setup_on_ && !scenes_.Active()) StartMusic(NowMs());   // back to the music
         if (woke && music_shown) scenes_.Return(NowMs());      // a conversation: she needs her face
         if (thinking_ && asleep_) {
             thinking_ = false;
@@ -438,6 +464,8 @@ private:
     face::ListeningRing ring_;
     bool thinking_ = false;
     bool music_on_ = false;        // the server said music is playing (spec 021)
+    bool setup_on_ = false;        // waiting for a WiFi: the gear (spec 028)
+    bool gear_back_ = false;       // the gear is folding back into the face: let it finish
     bool in_blink_ = false;
     float scene_level_ = 0;
     int64_t tick_n_ = 0, tick_sum_ = 0, tick_max_ = 0, tick_report_ = 0;
@@ -628,7 +656,7 @@ private:
             return;
         }
         // The face came back for a conversation that is over: the music is still on.
-        if (music_on_ && asleep_) { StartMusic(NowMs()); return; }
+        if (music_on_ && asleep_ && !setup_on_) { StartMusic(NowMs()); return; }
         if (!thinking_) { lv_timer_pause(scene_timer_); return; }
         const float since = static_cast<float>(NowMs() - think_start_);
         // A safety net: a minute is longer than any search; if the server never
@@ -707,6 +735,10 @@ private:
     Button boot_button_;
     LcdDisplay* display_ = nullptr;
     DrawnFace* face_display_ = nullptr;
+    esp_timer_handle_t setup_watch_ = nullptr;
+    int64_t setup_since_ = 0;          // ms since boot when setup mode was last left alone
+    int64_t setup_probe_since_ = 0;    // trying the known networks since then; 0 when not
+    volatile bool setup_leave_now_ = false;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -826,6 +858,58 @@ private:
             });
     }
 
+    // Setup mode never ended on its own: the access point stayed up until
+    // somebody loaded a network on its page. A board that boots while the
+    // router is still down (a power cut) waited there for ever. So, every five
+    // minutes with nobody on its access point, it goes back to the networks it
+    // knows; if none answers in 45 s it returns to the access point, quietly —
+    // not through upstream's timeout, which would play the setup sound again
+    // every few minutes of a long night.
+    static constexpr int64_t SETUP_PATIENCE_MS = 5 * 60 * 1000;
+    static constexpr int64_t SETUP_PROBE_MS = 45 * 1000;
+
+    void StartSetupWatch() {
+        esp_timer_create_args_t args = {};
+        args.callback = [](void* arg) { static_cast<FreenoveEsp32S3Voice*>(arg)->WatchSetup(); };
+        args.arg = this;
+        args.dispatch_method = ESP_TIMER_TASK;
+        args.name = "setup_watch";
+        args.skip_unhandled_events = true;
+        if (esp_timer_create(&args, &setup_watch_) == ESP_OK) {
+            esp_timer_start_periodic(setup_watch_, 5 * 1000000ULL);
+        }
+    }
+
+    void WatchSetup() {
+        auto& wifi = WifiManager::GetInstance();
+        if (!wifi.IsInitialized()) return;
+        const int64_t now = esp_timer_get_time() / 1000;
+        if (wifi.IsConfigMode()) {
+            setup_probe_since_ = 0;
+            wifi_sta_list_t guests = {};
+            const bool somebody = esp_wifi_ap_get_sta_list(&guests) == ESP_OK && guests.num > 0;
+            if (setup_since_ == 0 || somebody) setup_since_ = now;   // never under somebody's hands
+            if (now - setup_since_ < SETUP_PATIENCE_MS && !setup_leave_now_) return;
+            setup_leave_now_ = false;
+            if (SsidManager::GetInstance().GetSsidList().empty()) { setup_since_ = now; return; }
+            ESP_LOGI(TAG, "setup mode: nobody came, trying the known networks");
+            setup_since_ = 0;
+            setup_probe_since_ = now;
+            wifi.StopConfigAp();              // WifiBoard takes it from here: TryWifiConnect()
+        } else if (setup_probe_since_ != 0) {
+            if (wifi.IsConnected()) { setup_probe_since_ = 0; return; }
+            if (now - setup_probe_since_ < SETUP_PROBE_MS) return;
+            ESP_LOGI(TAG, "setup mode: no known network answered, back to the access point");
+            setup_probe_since_ = 0;
+            esp_timer_stop(connect_timer_);
+            wifi.StopStation();
+            wifi.StartConfigAp();
+        } else {
+            setup_since_ = 0;
+            setup_leave_now_ = false;
+        }
+    }
+
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
@@ -835,15 +919,32 @@ private:
             }
             app.ToggleChatState();
         });
+        // Held for three seconds: setup mode, with or without a network. It is
+        // the button and not the voice on purpose: understanding «modo
+        // configuración» takes the server and the internet, and this is needed
+        // exactly when there is neither. Held again while in setup mode: leave
+        // it now and try the known networks.
+        // (Held while powering on it is the chip's download mode: nothing here
+        // can change that.)
+        boot_button_.OnLongPress([this]() {
+            if (IsInWifiConfigMode()) {
+                ESP_LOGI(TAG, "button held in setup mode: leaving it");
+                setup_leave_now_ = true;
+                return;
+            }
+            ESP_LOGI(TAG, "button held: setup mode");
+            EnterWifiConfigMode();
+        });
     }
 
 public:
-    FreenoveEsp32S3Voice() : boot_button_(BOOT_BUTTON_GPIO) {
+    FreenoveEsp32S3Voice() : boot_button_(BOOT_BUTTON_GPIO, false, 3000) {
         sofia_netlog::Start();     // the log also goes to the server (spec 018)
         InitializeSpi();
         InitializeLcdDisplay();
         InitializeTools();
         InitializeButtons();
+        StartSetupWatch();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
