@@ -1,6 +1,7 @@
 #include "wifi_board.h"
 #include "audio/codecs/no_audio_codec.h"
 #include "mic_highpass.h"
+#include "sofia_wireguard.h"
 #include "display/lcd_display.h"
 #include "display/lvgl_display/lvgl_theme.h"
 #include "assets/lang_config.h"
@@ -945,6 +946,7 @@ public:
         InitializeTools();
         InitializeButtons();
         StartSetupWatch();
+        sofia_wireguard::Start();   // SPIKE (spec 027)
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
