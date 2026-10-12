@@ -1089,7 +1089,7 @@ set(MAIN_PRIV_REQUIRES_EXTRA "")
 if(CONFIG_XIAOZHI_NETWORK_ETHERNET AND CONFIG_XIAOZHI_ETH_PHY_IP101)
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__ip101)
 endif()
-list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_wireguard)      # Sofia: the tunnel home (spec 027, SPIKE)
+list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_wireguard)      # Sofia: the tunnel home (spec 027)
 if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
         m5stack__m5pm1
