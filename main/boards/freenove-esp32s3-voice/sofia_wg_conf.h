@@ -65,11 +65,11 @@ inline bool IsKey(const std::string& s) {
 inline std::string Ipv4(const std::string& s, int* prefix = nullptr) {
     const size_t slash = s.find('/');
     const std::string host = Trim(s.substr(0, slash));
-    int dots = 0, value = -1, parts = 0;
+    int dots = 0, value = -1;
     for (const char c : host) {
         if (c == '.') {
             if (value < 0 || value > 255) return "";
-            ++dots; ++parts; value = -1;
+            ++dots; value = -1;
         } else if (c >= '0' && c <= '9') {
             value = (value < 0 ? 0 : value * 10) + (c - '0');
             if (value > 255) return "";
